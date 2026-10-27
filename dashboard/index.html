@@ -9,13 +9,15 @@
     >
 
     <meta name="theme-color" content="#0b1120">
+    <link rel="icon" type="image/jpeg" href="./assets/vaistrike-logo.jpg">
+    <link rel="apple-touch-icon" href="./assets/vaistrike-logo.jpg">
 
     <meta
         name="description"
         content="Market analysis dashboard with Indian indices, technical indicators, options data, global markets, and historical snapshots."
     >
 
-    <title>Market Pulse | Vaisakh</title>
+    <title>VaiStrike | Indian Markets</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -25,7 +27,7 @@
         rel="stylesheet"
     >
 
-    <link rel="stylesheet" href="./styles.css?v=practical-strategy-1">
+    <link rel="stylesheet" href="./styles.css?v=vaistrike-shortcuts-1">
 
     <!-- Lightweight Charts for interactive candlestick charts -->
     <script
@@ -33,7 +35,7 @@
         src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"
     ></script>
 
-    <script defer src="./app.js?v=practical-strategy-1"></script>
+    <script defer src="./app.js?v=vaistrike-shortcuts-3"></script>
 </head>
 
 <body>
@@ -44,12 +46,13 @@
         <header class="topbar">
 
             <div class="brand">
-                <div class="brand-icon">MP</div>
-
-                <div class="brand-copy">
-                    <h1>Market Pulse</h1>
-                    <p>Indian markets intelligence</p>
-                </div>
+                <a href="#overview" aria-label="VaiStrike home">
+                    <img
+                        class="brand-logo"
+                        src="./assets/vaistrike-logo.jpg"
+                        alt="VaiStrike — Read the market. Strike with precision."
+                    >
+                </a>
             </div>
 
             <div class="header-actions">
@@ -73,12 +76,22 @@
 
         </header>
 
+        <nav class="section-nav" aria-label="Dashboard shortcuts">
+            <a href="#marketOverview">Overview</a>
+            <a href="#marketSnapshot">Indices</a>
+            <a href="#chartAnalysis">CrossIndex</a>
+            <a href="#combinedDecision">Strategy</a>
+            <a href="#priceActionDecision">ATM signal</a>
+            <a href="#optionsIntelligence">Options</a>
+            <a href="#globalMarkets">Global</a>
+            <a href="#historySection">History</a>
+        </nav>
 
         <!-- Main content -->
         <main class="main-content">
 
             <!-- Page heading -->
-            <section class="page-heading">
+            <section class="page-heading" id="overview">
 
                 <div>
                     <div class="eyebrow">MARKET OVERVIEW</div>
@@ -100,7 +113,7 @@
 
 
             <!-- Overall market score -->
-            <section class="overall-grid">
+            <section class="overall-grid" id="marketOverview">
 
                 <article class="panel score-panel">
 
@@ -186,7 +199,7 @@
 
 
             <!-- Index cards -->
-            <section class="section">
+            <section class="section" id="marketSnapshot">
 
                 <div class="section-heading">
                     <div>
@@ -207,7 +220,7 @@
 
 
             <!-- Charts -->
-            <section class="section">
+            <section class="section" id="chartAnalysis">
 
                 <div class="section-heading chart-section-heading">
 
@@ -228,7 +241,7 @@
                             <option value="Nifty 100">Nifty 100 (Large Cap)</option>
                             <option value="Nifty Midcap">Nifty Midcap</option>
                             <option value="Sensex">Sensex</option>
-                            <option value="CrossIndex">CrossIndex (All Indices)</option>
+                            <option value="CrossIndex" selected>CrossIndex (All Indices)</option>
                         </select>
 
                         <div
@@ -259,7 +272,7 @@
 
                         <div id="singleIndexSummary">
                             <span id="chartInstrument" class="chart-instrument">
-                                Nifty 50
+                                CrossIndex (All Indices)
                             </span>
 
                             <div class="chart-price-line">
@@ -371,7 +384,7 @@
 
 
                 <!-- Options -->
-            <section class="section">
+            <section class="section" id="optionsIntelligence">
 
                 <div class="section-heading">
                     <div>
@@ -464,7 +477,7 @@
 
 
                 <!-- Global markets -->
-            <section class="section">
+            <section class="section" id="globalMarkets">
 
                 <div class="section-heading">
                     <div>
@@ -560,7 +573,7 @@
 
 
             <!-- History -->
-            <section class="section">
+            <section class="section" id="historySection">
 
                 <div class="section-heading">
                     <div>
@@ -610,7 +623,7 @@
         <!-- Footer -->
         <footer class="footer">
 
-            <span>Market Pulse</span>
+            <span>VaiStrike</span>
 
             <span>Designed for mobile and desktop</span>
 

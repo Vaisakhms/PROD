@@ -1,6 +1,6 @@
 "use strict";
 
-/* Market Pulse dashboard app.js — replacement, compatible with Lightweight Charts 4.2.2 */
+/* VaiStrike dashboard app.js — compatible with Lightweight Charts 4.2.2 */
 const DATA_URL = "./data/latest.json";
 const HISTORY_INDEX_URL = "./data/history/index.json";
 const SNAPSHOT_BASE_URL = "./data/snapshots/";
@@ -8,7 +8,7 @@ const SNAPSHOT_BASE_URL = "./data/snapshots/";
 const state = {
     data: null,
     history: [],
-    selectedIndex: "Nifty 50",
+    selectedIndex: "CrossIndex",
     selectedTimeframe: "Daily",
     charts: [],
     loading: false,
@@ -2059,7 +2059,7 @@ async function renderHistory() {
 function renderDashboard(data) {
     if (!data || typeof data !== "object" || !data.indices) {
         throw new Error(
-            "latest.json is not a valid Market Pulse data object."
+            "latest.json is not a valid market data object."
         );
     }
 
@@ -2145,6 +2145,31 @@ function setupControls() {
             detailToggle.textContent = expanded
                 ? "Show detailed cards"
                 : "Hide detailed cards";
+        });
+    }
+
+    const sectionNav = document.querySelector(".section-nav");
+    if (sectionNav) {
+        sectionNav.addEventListener("click", event => {
+            const link = event.target.closest("a[href^='#']");
+            if (!link) return;
+
+            const target = document.querySelector(link.getAttribute("href"));
+            if (!target || !detailCards?.contains(target) || !detailCards.hidden) return;
+
+            event.preventDefault();
+            detailCards.hidden = false;
+            detailToggle?.setAttribute("aria-expanded", "true");
+            if (detailToggle) detailToggle.textContent = "Hide detailed cards";
+            window.history.replaceState(null, "", link.getAttribute("href"));
+
+            const scrollMargin = Number.parseFloat(
+                window.getComputedStyle(target).scrollMarginTop
+            ) || 0;
+            window.scrollTo({
+                top: window.scrollY + target.getBoundingClientRect().top - scrollMargin,
+                behavior: "instant"
+            });
         });
     }
 
