@@ -437,6 +437,60 @@ def deduplicate_candle_rows(candles):
     return list(unique.values())
 
 
+def fetch_index_quotes():
+    """Fetch one shared LTP snapshot for all configured indices."""
+    fyers = get_fyers_client()
+    if not fyers:
+        return {}, None
+
+    try:
+        response = fyers.quotes(data={
+            "symbols": ",".join(INDICES.values()),
+        })
+    except Exception as exc:
+        print("Index quote request failed: %s" % exc)
+        return {}, None
+
+    if not isinstance(response, dict) or response.get("s") != "ok":
+        message = (
+            response.get("message") or response.get("s") or "invalid response"
+            if isinstance(response, dict)
+            else "invalid response"
+        )
+        print("Index quote request failed: %s" % message)
+        return {}, None
+
+    quotes = {}
+    for item in response.get("d") or []:
+        symbol = item.get("n")
+        values = item.get("v") or {}
+        ltp = values.get("lp")
+        try:
+            ltp = float(ltp)
+        except (TypeError, ValueError):
+            print("Index quote missing a valid LTP: %s" % (symbol or "unknown"))
+            continue
+
+        if not pd.notna(ltp) or ltp <= 0:
+            print("Index quote has a non-positive LTP: %s" % (symbol or "unknown"))
+            continue
+
+        name = next(
+            (index_name for index_name, index_symbol in INDICES.items()
+             if index_symbol == symbol),
+            None,
+        )
+        if name is None:
+            print("Ignoring quote for unconfigured index: %s" % symbol)
+            continue
+        quotes[name] = ltp
+
+    missing = set(INDICES) - set(quotes)
+    if missing:
+        print("Index LTP unavailable for: %s" % ", ".join(sorted(missing)))
+    return quotes, datetime.datetime.now(IST) if quotes else None
+
+
 def fetch_history(symbol, resolution, days):
     fyers = get_fyers_client()
 
@@ -559,16 +613,23 @@ def serialize_candles(df, limit=500):
     return candles
 
 
-def analyze_series(df):
+def analyze_series(df, current_price=None):
     """SMA 20/50/100 + RSI + trend score (-1..+1)."""
 
     if df is None or df.empty or len(df) < 21:
         return None
 
     close = df["Close"].astype(float)
+    prev = float(close.iloc[-1])
+    if current_price is not None and float(current_price) != prev:
+        close = pd.concat(
+            [close, pd.Series([float(current_price)])],
+            ignore_index=True,
+        )
+    elif len(close) >= 2:
+        prev = float(close.iloc[-2])
 
     last = float(close.iloc[-1])
-    prev = float(close.iloc[-2])
 
     sma = {}
 
@@ -604,6 +665,7 @@ def analyze_series(df):
     return {
         "close": last,
         "chg": (last / prev - 1) * 100 if prev else 0,
+        "ltp": last,
         "sma": sma,
         "rsi": float(rsi_value) if pd.notna(rsi_value) else None,
         "score": score,
@@ -620,14 +682,52 @@ def completed_history(df, timeframe, now):
     if timeframe == "Daily":
         return df[df.index.date < current_time.date()]
 
-    minutes = int(timeframe[:-1])
+    minutes = int(timeframe[:-1]) * (
+        60 if timeframe.endswith("h") else 1
+    )
     return df[
         (df.index + datetime.timedelta(minutes=minutes))
         <= current_time
     ]
 
 
-def daily_history_with_latest_session(daily_df, intraday_df):
+def history_with_active_quote(df, fetched_df, timeframe, captured_at, ltp):
+    """Include the API's active candle with the captured quote, if present."""
+    if fetched_df is None or fetched_df.empty:
+        return df
+
+    minutes = int(timeframe[:-1]) * (
+        60 if timeframe.endswith("h") else 1
+    )
+    interval = datetime.timedelta(minutes=minutes)
+    active = fetched_df[
+        (fetched_df.index <= captured_at)
+        & (fetched_df.index + interval > captured_at)
+    ]
+    if active.empty:
+        return df
+
+    active = active.iloc[-1:].copy()
+    timestamp = active.index[-1]
+    if df is None:
+        df = active.iloc[0:0]
+    if timestamp in df.index:
+        return df
+
+    price = float(ltp)
+    active.loc[timestamp, "High"] = max(
+        float(active.loc[timestamp, "High"]),
+        price,
+    )
+    active.loc[timestamp, "Low"] = min(
+        float(active.loc[timestamp, "Low"]),
+        price,
+    )
+    active.loc[timestamp, "Close"] = price
+    return pd.concat([df, active]).sort_index()
+
+
+def daily_history_with_latest_session(daily_df, intraday_df, current_ltp=None):
     """Append the latest intraday session as a current daily candle."""
     if daily_df is None or daily_df.empty:
         daily_df = pd.DataFrame(
@@ -649,12 +749,17 @@ def daily_history_with_latest_session(daily_df, intraday_df):
     if session.empty:
         return daily_df
 
+    close = (
+        float(current_ltp)
+        if current_ltp is not None
+        else float(session["Close"].iloc[-1])
+    )
     current_session = pd.DataFrame(
         [{
             "Open": float(session["Open"].iloc[0]),
-            "High": float(session["High"].max()),
-            "Low": float(session["Low"].min()),
-            "Close": float(session["Close"].iloc[-1]),
+            "High": max(float(session["High"].max()), close),
+            "Low": min(float(session["Low"].min()), close),
+            "Close": close,
             "Volume": float(session["Volume"].sum()),
         }],
         index=[session.index[0].normalize()],
@@ -1606,11 +1711,17 @@ def build_dashboard_payload(
     weight_sum,
     status,
     strategy,
+    live_quotes=None,
+    ltp_captured_at=None,
 ):
     index_data = {}
 
     for name in INDICES:
         index_data[name] = {
+            "ltp": (live_quotes or {}).get(name),
+            "ltp_captured_at": ltp_captured_at.isoformat()
+            if ltp_captured_at and name in (live_quotes or {})
+            else None,
             "timeframes": analysis.get(name, {}),
             "seven_day": seven.get(name),
             "charts": chart_data.get(name, {}),
@@ -1622,6 +1733,9 @@ def build_dashboard_payload(
         "generated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": "Asia/Kolkata",
         "market_status": status,
+        "ltp_captured_at": (
+            ltp_captured_at.isoformat() if ltp_captured_at else None
+        ),
         "overall": {
             "score": total,
             "label": overall_label(total),
@@ -1853,14 +1967,20 @@ def main():
     daily_data = {}
     chart_data = {}
     intraday_data = {}
+    frame_history = {}
+    raw_history = {}
 
     for name, symbol in INDICES.items():
         analysis[name] = {}
         chart_data[name] = {}
+        frame_history[name] = {}
+        raw_history[name] = {}
 
         for label, resolution, days in TIMEFRAMES:
             fetched = fetch_history(symbol, resolution, days)
+            raw_history[name][label] = fetched
             df = completed_history(fetched, label, now)
+            frame_history[name][label] = df
 
             analysis_df = df
             chart_df = df
@@ -1885,6 +2005,67 @@ def main():
             analysis[name][label] = analyze_series(analysis_df)
 
             time.sleep(0.15)
+
+    live_quotes, ltp_captured_at = fetch_index_quotes()
+    if ltp_captured_at:
+        now = ltp_captured_at
+        status = market_status(now)
+        for name in INDICES:
+            for label, _, _ in TIMEFRAMES:
+                frame_history[name][label] = completed_history(
+                    raw_history[name].get(label),
+                    label,
+                    ltp_captured_at,
+                )
+            daily_data[name] = frame_history[name]["Daily"]
+            intraday_data[name] = frame_history[name]["3m"]
+
+    for name in INDICES:
+        ltp = live_quotes.get(name)
+        if ltp is None:
+            continue
+
+        for label, _, _ in TIMEFRAMES:
+            if label == "Daily":
+                analysis_df = daily_history_with_latest_session(
+                    daily_data.get(name),
+                    raw_history[name].get("3m"),
+                    current_ltp=ltp,
+                )
+                chart_data[name][label] = serialize_candles(
+                    analysis_df,
+                    limit=500,
+                )
+                has_current_session = (
+                    analysis_df is not None
+                    and daily_data.get(name) is not None
+                    and len(analysis_df) > len(daily_data[name])
+                )
+                analysis[name][label] = analyze_series(
+                    analysis_df
+                    if has_current_session
+                    else daily_data.get(name),
+                    current_price=None if has_current_session else ltp,
+                )
+            else:
+                chart_df = history_with_active_quote(
+                    frame_history[name].get(label),
+                    raw_history[name].get(label),
+                    label,
+                    ltp_captured_at,
+                    ltp,
+                )
+                chart_data[name][label] = serialize_candles(
+                    chart_df,
+                    limit=1200 if label in ("3m", "5m", "10m") else 500,
+                )
+                analysis[name][label] = analyze_series(
+                    frame_history[name].get(label),
+                    current_price=ltp,
+                )
+
+            if analysis[name][label]:
+                analysis[name][label]["ltp"] = ltp
 
     nifty = analysis["Nifty 50"]
     bank = analysis["Bank Nifty"]
@@ -2208,6 +2389,8 @@ def main():
         weight_sum=weight_sum,
         status=status,
         strategy=strategy,
+        live_quotes=live_quotes,
+        ltp_captured_at=ltp_captured_at,
     )
 
     save_dashboard_snapshot(payload)

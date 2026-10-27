@@ -299,6 +299,7 @@ function renderIndexCards(data) {
     container.innerHTML = entries.map(([name, item]) => {
         const daily = item.timeframes?.Daily || {};
         const intraday = item.timeframes?.["15m"] || daily;
+        const ltp = number(item.ltp, number(daily.close));
         const change = number(daily.chg, 0);
 
         return `
@@ -306,7 +307,7 @@ function renderIndexCards(data) {
                 <div class="panel-heading">
                     <div>
                         <span class="eyebrow">${escapeHtml(name)}</span>
-                        <h3>${formatNumber(daily.close)}</h3>
+                        <h3>${formatNumber(ltp)}</h3>
                     </div>
                     <span class="change-pill ${change >= 0 ? "positive" : "negative"}">
                         ${formatPercent(change)}
@@ -1284,7 +1285,11 @@ function renderChart() {
         `${state.selectedIndex} · ${timeframe}`
     );
 
-    setText("chartPrice", formatNumber(timeframeData.close));
+    const ltp = number(
+        indexData.ltp,
+        number(timeframeData.ltp, number(timeframeData.close))
+    );
+    setText("chartPrice", formatNumber(ltp));
 
     const change = number(timeframeData.chg, 0);
 
@@ -1353,6 +1358,17 @@ function renderChart() {
             close: Number(c.close)
         }))
     );
+
+    if (ltp !== null) {
+        candleSeries.createPriceLine({
+            price: ltp,
+            color: "#f8fafc",
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: "LTP"
+        });
+    }
 
     const movingAverages = [
         { key: "sma20", name: "SMA 20", color: "#38bdf8" },
