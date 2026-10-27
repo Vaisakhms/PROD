@@ -7,6 +7,8 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 INDEX_NAMES = ("Nifty 50", "Bank Nifty", "Nifty Midcap", "Nifty 100")
 TREND_FRAMES = ("5m", "10m", "15m")
 SCORE_THRESHOLD = 5.0
+SUPPORT_WATCH_THRESHOLD_PCT = 0.30
+LEVEL_PROXIMITY_THRESHOLD_PCT = 0.30
 
 
 def _number(value):
@@ -67,87 +69,300 @@ def _trigger(frames):
     return "None"
 
 
-def _fresh_completed_candle(candles, now, interval_seconds, max_age_seconds):
-    if not candles:
-        return False
-    candle_start = _number(candles[-1].get("time"))
-    if candle_start is None:
-        return False
-    age = now.timestamp() - (candle_start + interval_seconds)
-    return 0 <= age <= max_age_seconds
+def _level_distance(spot, levels, side):
+    eligible = []
+    for level in levels:
+        price = _number(level.get("price"))
+        if price is None or level.get("side") != side:
+            continue
+        if side == "support" and price > spot:
+            continue
+        if side == "resistance" and price < spot:
+            continue
+        distance = abs(spot - price) / spot * 100 if spot > 0 else None
+        if distance is not None and distance <= LEVEL_PROXIMITY_THRESHOLD_PCT:
+            eligible.append((distance, level))
+    return min(eligible, key=lambda item: item[0]) if eligible else (None, None)
 
 
-def _scalp_opportunity(now, nifty, options, lot_size):
-    local_now = now.astimezone(IST)
-    wait = {"decision": "WAIT", "reason": "Scalp setup filters did not pass."}
-
-    if (
-        not _evaluation_window(now)
-        or not datetime.time(9, 20) <= local_now.time() <= datetime.time(14, 45)
-    ):
-        return {**wait, "reason": "Outside the scalp entry window."}
-    if not nifty or not options or options.get("source") != "Fyers":
-        return {**wait, "reason": "Live Nifty and Fyers option data are required."}
-    if not options.get("spot_live") or not lot_size or lot_size <= 0:
-        return {**wait, "reason": "Live spot or current exchange lot size is unavailable."}
-
-    expiry_date = options.get("expiry_date")
-    if not expiry_date:
-        return {**wait, "reason": "Option expiry is unavailable."}
-    if expiry_date == local_now.date().isoformat():
-        return {**wait, "reason": "Expiry-day scalp entries are disabled."}
-
-    try:
-        captured_at = datetime.datetime.fromisoformat(options["captured_at"])
-        if captured_at.tzinfo is None:
-            return {**wait, "reason": "Option-chain timestamp has no timezone."}
-        quote_age = (now - captured_at).total_seconds()
-    except (KeyError, TypeError, ValueError):
-        return {**wait, "reason": "Option-chain timestamp is unavailable or invalid."}
-    if not 0 <= quote_age <= 180:
-        return {**wait, "reason": "Live option-chain data is stale."}
-
-    frames = nifty.get("frames") or {}
-    candles_3m = (frames.get("3m") or {}).get("candles") or []
-    candles_5m = (frames.get("5m") or {}).get("candles") or []
-    if (
-        not _fresh_completed_candle(candles_3m, now, 180, 360)
-        or not _fresh_completed_candle(candles_5m, now, 300, 480)
-    ):
-        return {**wait, "reason": "Fresh completed 3m and 5m candles are required."}
-
-    trigger = _trigger(frames)
-    if trigger not in ("Bullish", "Bearish"):
-        return {**wait, "reason": "No confirmed 3m breakout trigger."}
-    direction = "CE" if trigger == "Bullish" else "PE"
-    expected_trend = "Bullish" if direction == "CE" else "Bearish"
-    trend_5m = _trend((frames.get("5m") or {}).get("analysis"))
-    trend_15m = _trend((frames.get("15m") or {}).get("analysis"))
-    if trend_5m != expected_trend:
-        return {**wait, "reason": "The 3m breakout is not aligned with the Nifty 5m trend."}
-    if trend_15m not in (expected_trend, "Mixed"):
-        return {**wait, "reason": "The Nifty 15m trend is unavailable or opposes the breakout."}
-
-    spot = _number(options.get("spot"))
-    atm = _number(options.get("atm"))
-    nifty_close = _number(
-        ((frames.get("15m") or {}).get("analysis") or {}).get("close")
+def _snapshot_spot(index_data, analysis):
+    return (
+        _number(index_data.get("ltp"))
+        or _number(analysis.get("ltp"))
+        or _number(analysis.get("close"))
     )
-    premium = _number((options.get("ce" if direction == "CE" else "pe") or {}).get("ltp"))
-    if (
-        spot is None or atm is None or nifty_close is None or premium is None
-        or premium <= 0 or abs(atm - spot) > 25 or abs(atm - nifty_close) > 25
-    ):
-        return {**wait, "reason": "Fresh ATM strike, spot, or option premium is unavailable."}
 
+
+def _cross_index_level_bias(indices, per_index_levels):
+    by_index = {}
+    for name in INDEX_NAMES:
+        frames = (indices.get(name) or {}).get("frames") or {}
+        frame = frames.get("15m") or {}
+        analysis = frame.get("analysis") or frame
+        spot = _snapshot_spot(indices.get(name) or {}, analysis)
+        levels = per_index_levels.get(name) or []
+        support_distance, support = (
+            _level_distance(spot, levels, "support")
+            if spot is not None else (None, None)
+        )
+        resistance_distance, resistance = (
+            _level_distance(spot, levels, "resistance")
+            if spot is not None else (None, None)
+        )
+        by_index[name] = {
+            "spot": spot,
+            "support": support,
+            "support_distance_pct": support_distance,
+            "resistance": resistance,
+            "resistance_distance_pct": resistance_distance,
+        }
+
+    support_names = [
+        name for name, item in by_index.items() if item["support"] is not None
+    ]
+    resistance_names = [
+        name for name, item in by_index.items()
+        if item["resistance"] is not None
+    ]
+    support_only_names = set(support_names) - set(resistance_names)
+    resistance_only_names = set(resistance_names) - set(support_names)
+    bullish = (
+        "Nifty 50" in support_names
+        and "Bank Nifty" in support_names
+        and any(name in support_names for name in ("Nifty 100", "Nifty Midcap"))
+    )
+    bearish = (
+        "Nifty 50" in resistance_names
+        and "Bank Nifty" in resistance_names
+        and any(name in resistance_names for name in ("Nifty 100", "Nifty Midcap"))
+    )
+
+    if support_only_names and resistance_only_names:
+        direction = None
+        reason = "Nearby support and resistance are split across the indices."
+    elif bullish and bearish:
+        direction = None
+        reason = "Both support and resistance confluence are present."
+    elif bullish:
+        direction = "CE"
+        reason = "Nifty 50, Bank Nifty, and at least one of Nifty 100/Midcap are near support."
+    elif bearish:
+        direction = "PE"
+        reason = "Nifty 50, Bank Nifty, and at least one of Nifty 100/Midcap are near resistance."
+    else:
+        direction = None
+        reason = "Required Nifty 50, Bank Nifty, and Nifty 100/Midcap level confluence is absent."
+
+    nifty = by_index.get("Nifty 50") or {}
+    level = nifty.get("support") if direction == "CE" else (
+        nifty.get("resistance") if direction == "PE" else None
+    )
+    return {
+        "direction": direction,
+        "action": "ATM BUY " + direction if direction else "WAIT",
+        "reason": reason,
+        "score": 2 if direction else 0,
+        "support_indices": support_names,
+        "resistance_indices": resistance_names,
+        "indices": by_index,
+        "nifty_level": level,
+    }
+
+
+def _level_reversal(candle, direction, level):
+    if not candle or not level:
+        return False
+    open_price = _number(candle.get("open"))
+    high = _number(candle.get("high"))
+    low = _number(candle.get("low"))
+    close = _number(candle.get("close"))
+    price = _number(level.get("price"))
+    if None in (open_price, high, low, close, price) or price <= 0:
+        return False
+    lower_wick = min(open_price, close) - low
+    upper_wick = high - max(open_price, close)
+    if direction == "CE":
+        return (
+            low <= price * 1.003
+            and close >= price
+            and (close >= open_price or lower_wick > upper_wick)
+        )
+    return (
+        high >= price * 0.997
+        and close <= price
+        and (close <= open_price or upper_wick > lower_wick)
+    )
+
+
+def _scalp_opportunity(indices, per_index_levels, options):
+    bias = _cross_index_level_bias(indices, per_index_levels)
+    wait = {
+        "decision": "WAIT",
+        "direction": None,
+        "reason": bias["reason"],
+        "duration_minutes": 15,
+        "score": 0,
+    }
+    direction = bias["direction"]
+    if direction is None:
+        return wait
+
+    frames = (indices.get("Nifty 50") or {}).get("frames") or {}
+    candles = (frames.get("3m") or {}).get("candles") or []
+    candle = candles[-1] if candles else None
+    if not _level_reversal(candle, direction, bias["nifty_level"]):
+        wait["reason"] = (
+            "Cross-index levels align, but the latest Nifty 3m candle has not "
+            "confirmed a reversal at the Nifty level."
+        )
+        wait["setup_direction"] = direction
+        return wait
+
+    spot = _number(options.get("spot")) if options else None
+    atm = _number(options.get("atm")) if options else None
+    premium = _number(
+        (options.get("ce" if direction == "CE" else "pe") or {}).get("ltp")
+    ) if options else None
+    if (
+        spot is None or atm is None or abs(atm - spot) > 25
+        or premium is None or premium <= 0
+    ):
+        wait["reason"] = (
+            "The 3m reversal is confirmed, but a valid ATM strike and matching "
+            "option premium are unavailable in this snapshot."
+        )
+        wait["setup_direction"] = direction
+        wait["reference_level"] = bias["nifty_level"]
+        return wait
+
+    candle_low = _number(candle.get("low"))
+    candle_high = _number(candle.get("high"))
+    confirmation_indices = (
+        bias["support_indices"]
+        if direction == "CE"
+        else bias["resistance_indices"]
+    )
     return {
         "decision": "BUY ATM " + direction,
         "direction": direction,
-        "reason": "Completed 3m breakout aligned with Nifty 5m trend; 15m trend is not opposing.",
-        "trigger_3m": trigger,
-        "trend_5m": trend_5m,
-        "trend_15m": trend_15m,
+        "reason": (
+            f"{bias['reason']} Latest Nifty 3m candle confirms the reversal."
+        ),
+        "duration_minutes": 15,
+        "score": 1,
         "premium": premium,
+        "atm": atm,
+        "spot": spot,
+        "reference_level": bias["nifty_level"],
+        "entry_trigger": candle_high if direction == "CE" else candle_low,
+        "invalidation_level": candle_low if direction == "CE" else candle_high,
+        "level_confirmations": confirmation_indices,
+    }
+
+
+def _main_strategy_plan(indices, per_index_levels, events, market_bias, oi,
+                        scalp_opportunity):
+    cross_index = _cross_index_level_bias(indices, per_index_levels)
+    direction = cross_index["direction"]
+    if direction is None:
+        return {
+            "decision": "WAIT",
+            "direction": None,
+            "score": 0,
+            "score_max": 5,
+            "components": {
+                "cross_index": 0,
+                "weighted_market_bias": 0,
+                "atm_oi": 0,
+                "scalp": 0,
+            },
+            "reason": cross_index["reason"],
+            "cross_index_bias": cross_index,
+            "price_confirmed": False,
+        }
+
+    expected_event = "support hold" if direction == "CE" else "resistance rejection"
+    nifty_event = events.get("Nifty 50") or {}
+    price_confirmed = nifty_event.get("kind") == expected_event
+    weighted = _number(market_bias)
+    weighted_aligned = (
+        weighted is not None
+        and (weighted >= 15 if direction == "CE" else weighted <= -15)
+    )
+    oi_aligned = bool(
+        oi
+        and oi.get("verdict") == ("Bullish" if direction == "CE" else "Bearish")
+        and oi.get("flow") == ("Bullish" if direction == "CE" else "Bearish")
+    )
+    scalp_direction = scalp_opportunity.get("direction")
+    scalp_opposes = (
+        scalp_direction is not None and scalp_direction != direction
+    )
+    components = {
+        "cross_index": 2,
+        "weighted_market_bias": int(weighted_aligned),
+        "atm_oi": int(oi_aligned),
+        "scalp": int(scalp_direction == direction),
+    }
+    score = sum(components.values())
+    if scalp_opposes:
+        reason = "The scalp setup currently points in the opposite direction."
+    elif not price_confirmed:
+        reason = f"Nifty 15m has not confirmed the {direction} level hold/rejection."
+    elif score < 3:
+        reason = (
+            "Directional level and 15m confirmation are present, but fewer "
+            "than 3 of 5 points are available."
+        )
+    else:
+        reason = (
+            f"Cross-index confluence and Nifty 15m confirmation pass "
+            f"({score}/5 points)."
+        )
+    decision = "BUY ATM " + direction if (
+        price_confirmed and score >= 3 and not scalp_opposes
+    ) else "WAIT"
+
+    nifty_frames = (indices.get("Nifty 50") or {}).get("frames") or {}
+    candles = (nifty_frames.get("15m") or {}).get("candles") or []
+    candle = candles[-1] if candles else {}
+    invalidation = _number(candle.get("low" if direction == "CE" else "high"))
+    target_side = "resistance" if direction == "CE" else "support"
+    spot = _number(
+        (indices.get("Nifty 50") or {}).get("ltp")
+        or ((nifty_frames.get("15m") or {}).get("analysis") or {}).get("ltp")
+        or ((nifty_frames.get("15m") or {}).get("analysis") or {}).get("close")
+    )
+    targets = [
+        _number(level.get("price"))
+        for level in per_index_levels.get("Nifty 50", [])
+        if level.get("side") == target_side
+        and _number(level.get("price")) is not None
+        and spot is not None
+        and (
+            _number(level.get("price")) > spot
+            if direction == "CE"
+            else _number(level.get("price")) < spot
+        )
+    ]
+    target = (
+        min(targets) if direction == "CE" and targets
+        else max(targets) if direction == "PE" and targets
+        else None
+    )
+    return {
+        "decision": decision,
+        "direction": direction,
+        "score": score,
+        "score_max": 5,
+        "components": components,
+        "reason": reason,
+        "cross_index_bias": cross_index,
+        "price_confirmed": price_confirmed,
+        "confirmation_event": nifty_event,
+        "invalidation_level": invalidation,
+        "first_target": target,
+        "snapshot_based": True,
     }
 
 
@@ -196,6 +411,107 @@ def _event(candles, levels, near_percent):
                 return {"direction": "PE", "kind": "resistance rejection",
                         "level": level}
     return None
+
+
+def _support_watch(indices, per_index_levels, events):
+    index_states = []
+    for name in INDEX_NAMES:
+        index_data = indices.get(name) or {}
+        frame = (index_data.get("frames") or {}).get("15m") or {}
+        analysis = frame.get("analysis") or frame
+        spot = _number(analysis.get("close"))
+        supports = [
+            level for level in per_index_levels.get(name, [])
+            if level.get("side") == "support"
+            and _number(level.get("price")) is not None
+            and _number(level.get("price")) <= spot
+        ] if spot is not None else []
+        nearest = max(
+            supports,
+            key=lambda level: _number(level.get("price")),
+            default=None,
+        )
+        event = events.get(name) or {}
+        event_level = event.get("level") or {}
+        event_price = _number(event_level.get("price"))
+        distance = (
+            abs(spot - _number(nearest["price"])) / spot * 100
+            if nearest and spot and spot > 0 else None
+        )
+        event_distance = (
+            abs(spot - event_price) / spot * 100
+            if event_price is not None and spot and spot > 0 else None
+        )
+
+        if spot is None or not per_index_levels.get(name):
+            status = "UNAVAILABLE"
+        elif (
+            event.get("kind") == "support breakdown"
+            and event_distance is not None
+            and event_distance <= SUPPORT_WATCH_THRESHOLD_PCT + 0.20
+        ):
+            status = "BROKEN"
+        elif (
+            event.get("kind") == "support hold"
+            and event_distance is not None
+            and event_distance <= SUPPORT_WATCH_THRESHOLD_PCT
+        ):
+            status = "HOLDING"
+        elif distance is not None and distance <= SUPPORT_WATCH_THRESHOLD_PCT:
+            status = "NEAR"
+        else:
+            status = "CLEAR"
+
+        index_states.append({
+            "name": name,
+            "status": status,
+            "support_name": nearest.get("name") if nearest else (
+                event_level.get("name") if status in ("BROKEN", "HOLDING") else None
+            ),
+            "support_price": _number(nearest.get("price")) if nearest else (
+                event_price if status in ("BROKEN", "HOLDING") else None
+            ),
+            "distance_pct": round(distance, 3) if distance is not None else (
+                round(event_distance, 3) if event_distance is not None else None
+            ),
+        })
+
+    near_indices = [
+        item["name"] for item in index_states
+        if item["status"] in ("NEAR", "HOLDING")
+    ]
+    nifty_status = index_states[0]["status"]
+    if nifty_status == "BROKEN":
+        status = "INVALIDATED"
+    elif nifty_status == "UNAVAILABLE" or any(
+        item["status"] == "UNAVAILABLE" for item in index_states
+    ):
+        status = "UNAVAILABLE"
+    elif nifty_status in ("NEAR", "HOLDING") and len(near_indices) >= 2:
+        status = "SUPPORT WATCH"
+    else:
+        status = "NO CONFLUENCE"
+
+    return {
+        "status": status,
+        "active": status == "SUPPORT WATCH",
+        "near_count": len(near_indices),
+        "required_count": 2,
+        "threshold_pct": SUPPORT_WATCH_THRESHOLD_PCT,
+        "nifty_status": nifty_status,
+        "near_indices": near_indices,
+        "indices": index_states,
+        "reason": (
+            "Nifty and at least one other index are near/holding their own "
+            "support. This is a watch state, not an entry signal."
+            if status == "SUPPORT WATCH"
+            else "Nifty support is broken; the bullish support thesis is invalidated."
+            if status == "INVALIDATED"
+            else "Waiting for Nifty and another index to approach their own support."
+            if status == "NO CONFLUENCE"
+            else "Support proximity cannot be assessed from the available index data."
+        ),
+    }
 
 
 def _event_confirms_level(event, kind, level):
@@ -450,25 +766,32 @@ def _make_levels(index_name, data, pivots, options):
     for timeframe in ("30m", "1h", "Daily"):
         frame = (data.get("frames") or {}).get(timeframe) or {}
         frame = frame.get("analysis") or frame
+        frame15 = (data.get("frames", {}).get("15m") or {})
+        frame15 = frame15.get("analysis") or frame15
+        current_spot = (
+            _number(data.get("ltp"))
+            or _number(frame15.get("ltp"))
+            or _number(frame15.get("close"))
+        )
         sma = _sma_values(frame)
         for period in ("50", "100"):
             price = sma[int(period)]
-            if price is not None:
-                frame15 = (data.get("frames", {}).get("15m") or {})
-                frame15 = frame15.get("analysis") or frame15
-                close = _number(frame15.get("close"))
-                if close is not None:
-                    output.append({
-                        "name": "SMA%s %s" % (period, timeframe),
-                        "price": price,
-                        "side": "support" if close >= price else "resistance",
-                        "major": True,
-                    })
+            if price is not None and current_spot is not None:
+                output.append({
+                    "name": "SMA%s %s" % (period, timeframe),
+                    "price": price,
+                    "side": "support" if current_spot >= price else "resistance",
+                    "major": True,
+                })
     frame15 = (data.get("frames") or {}).get("15m") or {}
     frame15 = frame15.get("analysis") or frame15
     minor = _sma_values(frame15)[20]
     if minor is not None:
-        close = _number(frame15.get("close"))
+        close = (
+            _number(data.get("ltp"))
+            or _number(frame15.get("ltp"))
+            or _number(frame15.get("close"))
+        )
         if close is not None:
             output.append({
                 "name": "SMA20 15m", "price": minor,
@@ -515,12 +838,6 @@ def evaluate_strategy(now, indices, pivots, options, previous, state,
         for name in INDEX_NAMES
     }
     trigger = _trigger(frames.get("Nifty 50") or {})
-    scalp_opportunity = _scalp_opportunity(
-        now,
-        indices.get("Nifty 50") or {},
-        options,
-        lot_size,
-    )
     consolidating = {
         name: _consolidating(frames[name], name == "Bank Nifty")
         for name in INDEX_NAMES
@@ -534,10 +851,24 @@ def evaluate_strategy(now, indices, pivots, options, previous, state,
         candles = (frames[name].get("15m") or {}).get("candles") or []
         percent = 0.2 if name == "Bank Nifty" else 0.15
         events[name] = _event(candles, per_index_levels[name], percent)
+    support_watch = _support_watch(indices, per_index_levels, events)
+    scalp_opportunity = _scalp_opportunity(
+        indices,
+        per_index_levels,
+        options,
+    )
 
     oi = _oi_state(options, previous, now)
     if oi is None:
         reasons.append("Same-interval ATM OI/premium changes unavailable or stale.")
+    main_strategy = _main_strategy_plan(
+        indices,
+        per_index_levels,
+        events,
+        market_bias,
+        oi,
+        scalp_opportunity,
+    )
 
     required_data_available = True
     max_age_minutes = {"3m": 6, "5m": 8, "10m": 13, "15m": 18}
@@ -907,6 +1238,7 @@ def evaluate_strategy(now, indices, pivots, options, previous, state,
 
     if (
         not open_position and position_action is None and direction is not None
+        and main_strategy["decision"] == "BUY ATM " + direction
         and entry_window and daily_gate and lot_size and options
         and options.get("source") == "Fyers"
         and all(entry_filters.values())
@@ -952,7 +1284,10 @@ def evaluate_strategy(now, indices, pivots, options, previous, state,
     if nearest and nifty_spot is not None and nearest["price"]:
         distance = abs(nifty_spot - nearest["price"]) / nearest["price"] * 100
     detail = {
-        "decision": decision,
+        "decision": main_strategy["decision"],
+        "main_strategy": main_strategy,
+        "cross_index_bias": main_strategy["cross_index_bias"],
+        "legacy_entry_decision": decision,
         "scalp_opportunity": scalp_opportunity,
         "timestamp_ist": now.astimezone(IST).isoformat(),
         "ce_points": round(points["CE"], 2),
@@ -963,6 +1298,7 @@ def evaluate_strategy(now, indices, pivots, options, previous, state,
         "trigger_3m": trigger,
         "consolidating": consolidating,
         "level_events": events,
+        "support_watch": support_watch,
         "entry_filters": entry_filters,
         "oi": oi,
         "nearest_major_level": nearest,

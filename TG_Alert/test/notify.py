@@ -83,8 +83,9 @@ TIMEFRAMES = [
 INDICES = {
     "Nifty 50": "NSE:NIFTY50-INDEX",
     "Bank Nifty": "NSE:NIFTYBANK-INDEX",
+    "Nifty 100": "NSE:NIFTY100-INDEX",
     "Nifty Midcap": "NSE:NIFTYMIDCAP50-INDEX",
-    "Nifty 100": "NSE:NIFTY100-INDEX"
+    "Sensex": "BSE:SENSEX-INDEX",
 }
 
 EQUITY_TICKERS = [
@@ -1713,8 +1714,10 @@ def build_dashboard_payload(
     strategy,
     live_quotes=None,
     ltp_captured_at=None,
+    index_levels=None,
 ):
     index_data = {}
+    index_levels = index_levels or {}
 
     for name in INDICES:
         index_data[name] = {
@@ -1725,6 +1728,7 @@ def build_dashboard_payload(
             "timeframes": analysis.get(name, {}),
             "seven_day": seven.get(name),
             "charts": chart_data.get(name, {}),
+            "levels": index_levels.get(name, {}),
         }
 
     payload = {
@@ -2084,6 +2088,7 @@ def main():
     )
 
     strategy_indices = {}
+    index_levels = {}
     for name in INDICES:
         completed_daily = daily_data.get(name)
         previous_sessions = (
@@ -2096,6 +2101,15 @@ def main():
             if completed_daily is not None and not completed_daily.empty
             else None
         )
+        index_levels[name] = {
+            "pivots": pivots_from_daily(completed_daily) or {},
+            "previous_day_high": (
+                float(previous_day["High"]) if previous_day is not None else None
+            ),
+            "previous_day_low": (
+                float(previous_day["Low"]) if previous_day is not None else None
+            ),
+        }
         strategy_indices[name] = {
             "frames": {
                 label: {
@@ -2391,6 +2405,7 @@ def main():
         strategy=strategy,
         live_quotes=live_quotes,
         ltp_captured_at=ltp_captured_at,
+        index_levels=index_levels,
     )
 
     save_dashboard_snapshot(payload)

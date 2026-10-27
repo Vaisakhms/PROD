@@ -340,7 +340,6 @@ function renderIndexCards(data) {
     container.querySelectorAll("[data-index]").forEach(button => {
         button.addEventListener("click", () => {
             state.selectedIndex = button.dataset.index;
-
             const select = $("indexSelect");
             if (select) select.value = state.selectedIndex;
 
@@ -723,8 +722,6 @@ function renderCombinedDecision(data) {
     const staleSnapshot = snapshotAge === null
         || snapshotAge < 0
         || snapshotAge > 10 * 60 * 1000;
-    const marketClosed = /closed/i.test(data.market_status || "")
-        || staleSnapshot;
     const snapshotAgeLabel = snapshotAge === null
         ? "age unavailable"
         : snapshotAge < 0
@@ -738,35 +735,19 @@ function renderCombinedDecision(data) {
         ? `${formatDashboardDateTime(snapshotDate)} IST · ${snapshotAgeLabel}`
         : "Timestamp unavailable";
     const bias = combinedMarketBias(data);
-    const mainDecision = ["BUY ATM CE", "BUY ATM PE"].includes(strategy.decision)
-        ? strategy.decision
+    const crossIndexBias = crossIndexSignalFromSnapshot(data);
+    const mainStrategy = strategy.main_strategy || {};
+    const mainPlanDecision = mainStrategy.decision || strategy.decision;
+    const mainDecision = ["BUY ATM CE", "BUY ATM PE"].includes(mainPlanDecision)
+        ? mainPlanDecision
         : "WAIT";
     const scalp = strategy.scalp_opportunity || {};
-    const scalpDecision = marketClosed
-        ? "WAIT"
-        : ["BUY ATM CE", "BUY ATM PE"].includes(scalp.decision)
-            ? scalp.decision
-            : scalp.decision === "WAIT"
-                ? "WAIT"
-                : "Unavailable";
-    const candidate = mainDecision !== "WAIT"
+    const scalpDecision = ["BUY ATM CE", "BUY ATM PE"].includes(scalp.decision)
+        ? scalp.decision
+        : "WAIT";
+    const combinedDecision = mainDecision !== "WAIT"
         ? mainDecision
-        : scalpDecision.startsWith("BUY ATM")
-            ? scalpDecision
-            : "WAIT";
-    const candidateDirection = candidate.endsWith("CE")
-        ? "Bullish"
-        : candidate.endsWith("PE")
-            ? "Bearish"
-            : null;
-    const conflictsWithBias = Boolean(
-        candidateDirection
-        && (bias.direction === "Bullish" || bias.direction === "Bearish")
-        && candidateDirection !== bias.direction
-    );
-    const combinedDecision = marketClosed || conflictsWithBias
-        ? "WAIT"
-        : candidate;
+        : scalpDecision;
     const isScalpOnly = mainDecision === "WAIT"
         && scalpDecision.startsWith("BUY ATM")
         && combinedDecision !== "WAIT";
@@ -777,17 +758,11 @@ function renderCombinedDecision(data) {
     const decisionText = combinedDecision === "WAIT"
         ? "WAIT"
         : `${isScalpOnly ? "SCALP ONLY · " : ""}${combinedDecision}`;
-    const decisionReason = marketClosed
-        ? /closed/i.test(data.market_status || "")
-            ? "Market is closed; stored signals are not live trade calls."
-            : `Market data is ${snapshotAgeLabel}; live signals are disabled when data is over 10 minutes old.`
-        : conflictsWithBias
-            ? `${candidate} conflicts with the weighted overall market bias. Wait for alignment or reassessment.`
-            : candidate === "WAIT"
-                ? "Neither the main strategy nor the scalp setup has a valid entry signal."
-                : bias.direction === "Neutral / mixed"
-                    ? "Signal passed; broad market inputs are mixed, so treat it cautiously."
-                    : `Signal passed and agrees with the weighted ${bias.direction.toLowerCase()} market bias.`;
+    const decisionReason = mainDecision !== "WAIT"
+        ? `${mainStrategy.reason || "Main strategy conditions passed."} Based on the last captured snapshot; not a live quote.`
+        : isScalpOnly
+            ? `${scalp.reason || "Scalp conditions passed."} Intended scalp duration: up to ${formatNumber(scalp.duration_minutes, 0)} minutes. Based on the last captured snapshot; not a live quote.`
+        : mainStrategy.reason || scalp.reason || "Required directional setup is not confirmed.";
 
     const nifty = indices["Nifty 50"] || {};
     const niftyFrames = nifty.timeframes || {};
@@ -851,13 +826,18 @@ function renderCombinedDecision(data) {
         <div class="combined-metrics">
             <div class="combined-metric">
                 <span class="eyebrow">MAIN STRATEGY</span>
-                <strong>${escapeHtml(marketClosed ? "WAIT" : mainDecision)}</strong>
-                <small>${escapeHtml(strategy.reasons?.[0] || "See detailed strategy filters.")}</small>
+                <strong>${escapeHtml(mainDecision)}</strong>
+                <small>${escapeHtml(mainStrategy.reason || "See main strategy confirmations.")}</small>
             </div>
             <div class="combined-metric">
                 <span class="eyebrow">SCALP OPPORTUNITY</span>
                 <strong class="${scalpDecision.endsWith("CE") ? "positive" : scalpDecision.endsWith("PE") ? "negative" : "neutral"}">${escapeHtml(scalpDecision)}</strong>
-                <small>${escapeHtml(/closed/i.test(data.market_status || "") ? "Market closed." : staleSnapshot ? "Latest snapshot is stale; no live signal." : scalp.reason || "Scalp data unavailable.")}</small>
+                <small>${escapeHtml(`${scalp.reason || "Scalp setup is not confirmed."} ${staleSnapshot || /closed/i.test(data.market_status || "") ? "Based on last captured prices; not live." : ""}`)}</small>
+            </div>
+            <div class="combined-metric">
+                <span class="eyebrow">CROSS-INDEX LEVEL BIAS</span>
+                <strong class="${crossIndexBias.direction === "ce" ? "positive" : crossIndexBias.direction === "pe" ? "negative" : "neutral"}">${escapeHtml(crossIndexBias.action)}</strong>
+                <small>${escapeHtml(crossIndexBias.explanation)}</small>
             </div>
             <div class="combined-metric">
                 <span class="eyebrow">NIFTY TREND / BREADTH</span>
@@ -882,9 +862,8 @@ function renderCombinedDecision(data) {
         </div>
         <div class="combined-footer muted small-text">
             Composite bias uses the weighted backend score components${coverage === null ? "" : ` · ${coverage.toFixed(0)}% input coverage`}${supportingComponents.length ? ` · largest ${bias.direction === "Bearish" ? "bearish" : "bullish"} inputs: ${escapeHtml(supportingComponents.join(", "))}` : ""}.
-            ${conflictsWithBias ? " The signal is held at WAIT because the trade direction conflicts with strong aggregate bias." : ""}
             ${staleSnapshot && !/closed/i.test(data.market_status || "") ? ` Snapshot is stale (${escapeHtml(snapshotAgeLabel)}).` : ""}
-            Signals are informational only; no broker orders are placed.
+            Decisions use the last captured snapshot regardless of market status. Signals are informational only; no broker orders are placed.
         </div>
     `;
 }
@@ -976,14 +955,32 @@ function renderPriceActionDecision(data) {
     `;
 
     const strategy = data.strategy || {};
-    const marketClosed = /closed/i.test(data.market_status || "");
+    const snapshotTimestamp = Date.parse(data.generated_at || "");
+    const snapshotAge = Number.isFinite(snapshotTimestamp)
+        ? Date.now() - snapshotTimestamp
+        : null;
+    const staleSnapshot = snapshotAge === null
+        || snapshotAge < 0
+        || snapshotAge > 10 * 60 * 1000;
+    const lastCapturedLabel = staleSnapshot || /closed/i.test(data.market_status || "")
+        ? "Based on the last captured snapshot; not live."
+        : "Based on the latest captured snapshot; not a live quote.";
+    const mainStrategy = strategy.main_strategy || {};
     const scalpOpportunity = strategy.scalp_opportunity || {};
-    const scalpDecision = marketClosed
-        ? "WAIT"
-        : scalpOpportunity.decision || "WAIT";
-    const scalpReason = marketClosed
-        ? "Market closed; stored scalp data is not a live signal."
-        : scalpOpportunity.reason || "Scalp signal unavailable.";
+    const scalpDecision = ["BUY ATM CE", "BUY ATM PE"].includes(scalpOpportunity.decision)
+        ? scalpOpportunity.decision
+        : "WAIT";
+    const scalpReason = `${scalpOpportunity.reason || "Scalp signal unavailable."} ${lastCapturedLabel}`;
+    const supportWatch = strategy.support_watch || {};
+    const supportWatchStatus = supportWatch.status || "Unavailable";
+    const supportIndexSummary = (supportWatch.indices || []).map(item => {
+        const distance = number(item.distance_pct);
+        const level = number(item.support_price);
+        return `${item.name}: ${item.status}${level === null ? "" : ` at ${formatNumber(level, 0)}`}${distance === null ? "" : ` (${distance.toFixed(2)}%)`}`;
+    }).join(" · ");
+    const supportWatchReason = supportWatch.reason
+            ? `${supportWatch.reason} Approach threshold: ${formatNumber(supportWatch.threshold_pct, 2)}%.`
+            : "Support proximity data unavailable.";
     const scalpClass = scalpDecision === "BUY ATM CE"
         ? "buy-call"
         : scalpDecision === "BUY ATM PE"
@@ -994,8 +991,9 @@ function renderPriceActionDecision(data) {
     const pcrDisplay = latestPcr === null
         ? "Unavailable"
         : `${latestPcr.toFixed(2)}${number(oi.pcr) === null ? " (snapshot)" : ""}`;
-    const signal = ["BUY ATM CE", "BUY ATM PE"].includes(strategy.decision)
-        ? strategy.decision
+    const mainPlanDecision = mainStrategy.decision || strategy.decision;
+    const signal = ["BUY ATM CE", "BUY ATM PE"].includes(mainPlanDecision)
+        ? mainPlanDecision
         : "WAIT";
     const signalClass = signal === "BUY ATM CE"
         ? "buy-call"
@@ -1015,8 +1013,6 @@ function renderPriceActionDecision(data) {
         );
     const levelDistance = number(strategy.level_distance_pct);
     const positionAction = strategy.position_action || "";
-    const requiredInputsAvailable =
-        strategy.entry_filters?.required_data === true;
     const nifty15mCandles =
         data.indices?.["Nifty 50"]?.charts?.["15m"] || [];
     const lastNifty15mCandle = nifty15mCandles.reduce((latest, candle) => {
@@ -1030,11 +1026,8 @@ function renderPriceActionDecision(data) {
         : formatDashboardDateTime(
             new Date((lastNifty15mCandle + 15 * 60) * 1000).toISOString()
         );
-    const freshnessMessage = marketClosed
-        ? `Market closed — showing the latest available session data. Last completed Nifty 15m candle: ${lastNifty15mClose || "unavailable"} IST. No live entry signal is available after hours.`
-        : !requiredInputsAvailable
-            ? "Main strategy requires all market-data gates. The separate scalp signal uses fresh Nifty candles and live ATM quotes."
-            : "Market open — entries still require fresh completed candles, option-chain confirmation, and every strategy gate to pass.";
+    const freshnessMessage = `${lastCapturedLabel} Latest completed Nifty 15m candle: ${lastNifty15mClose || "unavailable"} IST. Decisions are evaluated from the snapshot without market-hours or freshness gates.`;
+    const mainComponents = mainStrategy.components || {};
 
     decision.innerHTML = `
         <h3>Nifty ATM Strategy Decision</h3>
@@ -1047,6 +1040,28 @@ function renderPriceActionDecision(data) {
             <strong class="${scalpClass}">${escapeHtml(scalpDecision)}</strong>
         </div>
         <p class="muted small-text">${escapeHtml(scalpReason)}</p>
+        <p class="muted small-text">${escapeHtml(`Scalp duration: up to ${formatNumber(scalpOpportunity.duration_minutes, 0)} minutes. Trigger: ${formatNumber(scalpOpportunity.entry_trigger)} · invalidation: ${formatNumber(scalpOpportunity.invalidation_level)}.`)}</p>
+        <div class="summary-row">
+            <span>Main strategy confirmation</span>
+            <strong>${escapeHtml(mainStrategy.reason || "Unavailable")}</strong>
+        </div>
+        <div class="summary-row">
+            <span>Main score / 5 (cross-index · market · OI · scalp)</span>
+            <strong>${formatNumber(mainStrategy.score, 0)} / ${formatNumber(mainStrategy.score_max, 0)} (${formatNumber(mainComponents.cross_index, 0)} · ${formatNumber(mainComponents.weighted_market_bias, 0)} · ${formatNumber(mainComponents.atm_oi, 0)} · ${formatNumber(mainComponents.scalp, 0)})</strong>
+        </div>
+        <div class="summary-row">
+            <span>15m confirmation · first target / invalidation</span>
+            <strong>${escapeHtml(mainStrategy.price_confirmed ? "Confirmed" : "Not confirmed")} · ${formatNumber(mainStrategy.first_target)} / ${formatNumber(mainStrategy.invalidation_level)}</strong>
+        </div>
+        <div class="summary-row">
+            <span>Cross-index support stage (watch only)</span>
+            <strong>${escapeHtml(supportWatchStatus)}</strong>
+        </div>
+        <p class="muted small-text">${escapeHtml(supportWatchReason)}</p>
+        ${supportIndexSummary ? `<p class="muted small-text">${escapeHtml(supportIndexSummary)}</p>` : ""}
+        <p class="muted small-text">
+            Support approach is context, not an entry by itself. Scalp and main strategy decisions use the latest captured prices and option snapshot; they do not place orders or model scale-ins.
+        </p>
         <div class="summary-row">
             <span>Decision time (IST)</span>
             <strong>${escapeHtml(formatDashboardDateTime(strategy.timestamp_ist || ""))}</strong>
@@ -1056,11 +1071,11 @@ function renderPriceActionDecision(data) {
             <strong>${formatNumber(strategy.lot_size, 0)}</strong>
         </div>
         <div class="summary-row">
-            <span>CE / PE / net points</span>
+            <span>Legacy engine CE / PE / net points</span>
             <strong>${formatNumber(strategy.ce_points, 1)} / ${formatNumber(strategy.pe_points, 1)} / ${formatNumber(strategy.net_score, 1)}</strong>
         </div>
         <div class="summary-row">
-            <span>3m trigger</span>
+            <span>Legacy engine 3m trigger</span>
             <strong>${escapeHtml(strategy.trigger_3m || "Unavailable")}</strong>
         </div>
         <div class="summary-row">
@@ -1076,8 +1091,8 @@ function renderPriceActionDecision(data) {
             <strong>${escapeHtml(level.name || "Unavailable")} ${formatNumber(level.price)}${levelDistance === null ? "" : ` (${levelDistance.toFixed(2)}%)`}</strong>
         </div>
         <p><strong>15m level confirmations:</strong> ${escapeHtml(levelEvents.join("; ") || "None")}</p>
-        <p><strong>Matched setups:</strong> ${escapeHtml(setups.map(item => `${item.name} → ${item.direction} +${item.points}`).join("; ") || "None")}</p>
-        <p><strong>Reason:</strong> ${escapeHtml(reasons.join(" ") || "No reason provided.")}</p>
+        <p><strong>Legacy matched setups:</strong> ${escapeHtml(setups.map(item => `${item.name} → ${item.direction} +${item.points}`).join("; ") || "None")}</p>
+        <p><strong>Main strategy reason:</strong> ${escapeHtml(mainStrategy.reason || "No reason provided.")}</p>
         ${positionAction ? `<p><strong>Position action:</strong> ${escapeHtml(positionAction)}</p>` : ""}
         ${position.direction ? `
             <div class="summary-row">
@@ -1158,6 +1173,440 @@ function validCandles(candles) {
         .map(c => ({ ...c, time: chartTime(c) }))
         .sort((a, b) => a.time - b.time)
         .filter((c, i, arr) => i === 0 || c.time > arr[i - 1].time);
+}
+
+const CROSS_INDEX_ORDER = [
+    "Nifty 50",
+    "Bank Nifty",
+    "Nifty 100",
+    "Nifty Midcap"
+];
+
+const CROSS_INDEX_COLORS = {
+    "Nifty 50": "#38bdf8",
+    "Bank Nifty": "#f59e0b",
+    "Nifty 100": "#a78bfa",
+    "Nifty Midcap": "#35d69a"
+};
+
+const CROSS_INDEX_LEVEL_THRESHOLD_PCT = 0.30;
+
+function crossIndexLevels(indexData, spot, sessionDate) {
+    const levels = [];
+    const addLevel = (name, value, side) => {
+        const price = number(value);
+        if (price !== null && price > 0) levels.push({ name, price, side });
+    };
+
+    const supplied = indexData.levels || {};
+    for (const [name, value] of Object.entries(supplied.pivots || {})) {
+        if (name.startsWith("S")) addLevel(name, value, "support");
+        else if (name.startsWith("R")) addLevel(name, value, "resistance");
+    }
+    addLevel("Previous-day low", supplied.previous_day_low, "support");
+    addLevel("Previous-day high", supplied.previous_day_high, "resistance");
+    addLevel("7-session low", indexData.seven_day?.lo, "support");
+    addLevel("7-session high", indexData.seven_day?.hi, "resistance");
+
+    const dailyCandles = validCandles(indexData.charts?.Daily || []);
+    const currentSessionCandles = sessionDate
+        ? dailyCandles.filter(candle => marketDate(candle.time) === sessionDate)
+        : [];
+    const currentSession = currentSessionCandles.at(-1);
+    if (currentSession) {
+        addLevel("Session low", currentSession.low, "support");
+        addLevel("Session high", currentSession.high, "resistance");
+    }
+
+    const completedSessions = dailyCandles.filter(candle =>
+        !sessionDate || marketDate(candle.time) < sessionDate
+    ).slice(-5);
+    if (completedSessions.length) {
+        addLevel(
+            "5-session low",
+            Math.min(...completedSessions.map(candle => candle.low)),
+            "support"
+        );
+        addLevel(
+            "5-session high",
+            Math.max(...completedSessions.map(candle => candle.high)),
+            "resistance"
+        );
+    }
+
+    for (const timeframe of ["15m", "30m", "1h", "Daily"]) {
+        const sma = indexData.timeframes?.[timeframe]?.sma || {};
+        for (const period of ["20", "50", "100"]) {
+            const price = number(sma[period]);
+            if (price === null || spot === null) continue;
+            addLevel(
+                `SMA ${period} ${timeframe}`,
+                price,
+                price <= spot ? "support" : "resistance"
+            );
+        }
+    }
+
+    const unique = levels.filter((level, index) =>
+        levels.findIndex(item =>
+            item.side === level.side
+            && Math.abs(item.price - level.price) < 0.01
+        ) === index
+    );
+    const supports = unique.filter(level =>
+        level.side === "support" && level.price <= spot
+    );
+    const resistances = unique.filter(level =>
+        level.side === "resistance" && level.price >= spot
+    );
+    const support = supports.reduce(
+        (nearest, level) => !nearest || level.price > nearest.price
+            ? level
+            : nearest,
+        null
+    );
+    const resistance = resistances.reduce(
+        (nearest, level) => !nearest || level.price < nearest.price
+            ? level
+            : nearest,
+        null
+    );
+
+    return {
+        support,
+        resistance,
+        supportDistance: support && spot > 0
+            ? (spot - support.price) / spot * 100
+            : null,
+        resistanceDistance: resistance && spot > 0
+            ? (resistance.price - spot) / spot * 100
+            : null
+    };
+}
+
+function crossIndexSignal(rows) {
+    const rowByName = new Map(rows.map(row => [row.name, row]));
+    const nifty = rowByName.get("Nifty 50");
+    const bankNifty = rowByName.get("Bank Nifty");
+    const supportingIndices = [
+        rowByName.get("Nifty 100"),
+        rowByName.get("Nifty Midcap")
+    ].filter(Boolean);
+    const requiredRows = [nifty, bankNifty, ...supportingIndices];
+    const levelsAvailable = requiredRows.length === 4
+        && requiredRows.every(row =>
+            row.spot !== null
+            && (row.levels.support || row.levels.resistance)
+        );
+    const supportConfirmers = supportingIndices.filter(row => row.nearSupport);
+    const resistanceConfirmers = supportingIndices.filter(row => row.nearResistance);
+    const supportSetup = Boolean(
+        nifty?.nearSupport && bankNifty?.nearSupport && supportConfirmers.length
+    );
+    const resistanceSetup = Boolean(
+        nifty?.nearResistance && bankNifty?.nearResistance && resistanceConfirmers.length
+    );
+
+    let action = "WAIT";
+    let direction = "wait";
+    let explanation;
+    if (!levelsAvailable) {
+        explanation = "One or more required indices do not have usable spot and key-level data.";
+    } else if (supportSetup && resistanceSetup) {
+        explanation = "Support and resistance confluence conflict across the required indices.";
+    } else if (supportSetup) {
+        action = "ATM BUY CE";
+        direction = "ce";
+        const confirmingNames = supportConfirmers.map(row => row.displayName).join(" and ");
+        explanation = `Nifty 50 and Bank Nifty are near support; ${confirmingNames} also confirm. Potential bounce setup only—confirm a bullish price-action turn before entry.`;
+    } else if (resistanceSetup) {
+        action = "ATM BUY PE";
+        direction = "pe";
+        const confirmingNames = resistanceConfirmers.map(row => row.displayName).join(" and ");
+        explanation = `Nifty 50 and Bank Nifty are near resistance; ${confirmingNames} also confirm. Potential rejection setup only—confirm a bearish price-action turn before entry.`;
+    } else {
+        explanation = `No simultaneous Nifty 50 + Bank Nifty + Nifty 100/Midcap level confluence within ${CROSS_INDEX_LEVEL_THRESHOLD_PCT.toFixed(2)}%.`;
+    }
+
+    return { action, direction, explanation };
+}
+
+function crossIndexSignalFromSnapshot(data) {
+    const generatedAt = Date.parse(data.generated_at || "");
+    const sessionDate = Number.isFinite(generatedAt)
+        ? marketDate(Math.floor(generatedAt / 1000))
+        : null;
+    const rows = CROSS_INDEX_ORDER.map(name => {
+        const item = data.indices?.[name] || {};
+        const spot = number(item.ltp, number(item.timeframes?.Daily?.ltp));
+        const levels = crossIndexLevels(item, spot, sessionDate);
+        return {
+            name,
+            displayName: name === "Nifty 100" ? "Nifty 100 (Large Cap)" : name,
+            spot,
+            levels,
+            nearSupport: levels.supportDistance !== null
+                && levels.supportDistance <= CROSS_INDEX_LEVEL_THRESHOLD_PCT,
+            nearResistance: levels.resistanceDistance !== null
+                && levels.resistanceDistance <= CROSS_INDEX_LEVEL_THRESHOLD_PCT
+        };
+    });
+
+    return crossIndexSignal(rows);
+}
+
+function marketDate(timestamp) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+    }).formatToParts(new Date(timestamp * 1000));
+    const values = Object.fromEntries(
+        parts.map(part => [part.type, part.value])
+    );
+    return `${values.year}-${values.month}-${values.day}`;
+}
+
+function renderCrossIndexChart(data) {
+    const singleSummary = $("singleIndexSummary");
+    const chartLegend = $("chartLegend");
+    const crossSummary = $("crossIndexSummary");
+    const volumeHeading = $("volumeHeading");
+    const volumeChart = $("volumeChart");
+    const rsiHeading = $("rsiHeading");
+    const rsiChart = $("rsiChart");
+    const priceContainer = $("priceChart");
+
+    if (singleSummary) singleSummary.hidden = true;
+    if (chartLegend) chartLegend.hidden = true;
+    if (crossSummary) crossSummary.hidden = false;
+    if (volumeHeading) volumeHeading.hidden = true;
+    if (volumeChart) volumeChart.hidden = true;
+    if (rsiHeading) rsiHeading.hidden = true;
+    if (rsiChart) rsiChart.hidden = true;
+    const timeframe = state.selectedTimeframe;
+    const timeframeLabel = timeframe === "Daily" ? "1D" : timeframe;
+    setText(
+        "chartInstrument",
+        `CrossIndex · ${timeframeLabel} relative performance`
+    );
+    setText("chartPrice", "4 indices");
+    setText("chartChange", "% from first candle close");
+
+    clearCharts();
+
+    const generatedAt = Date.parse(data.generated_at || "");
+    const sessionDate = Number.isFinite(generatedAt)
+        ? marketDate(Math.floor(generatedAt / 1000))
+        : null;
+    const currentTime = Number.isFinite(generatedAt)
+        ? Math.floor(generatedAt / 1000)
+        : null;
+    const isRecentOpenSnapshot =
+        !/closed/i.test(data.market_status || "")
+        && currentTime !== null
+        && Date.now() - generatedAt >= 0
+        && Date.now() - generatedAt <= 10 * 60 * 1000;
+    const lineData = [];
+    const rows = [];
+
+    for (const name of CROSS_INDEX_ORDER) {
+        const item = data.indices?.[name] || {};
+        const allCandles = validCandles(item.charts?.[timeframe] || []);
+        const candles = timeframe === "Daily"
+            ? allCandles
+            : allCandles.filter(candle =>
+                !sessionDate || marketDate(candle.time) === sessionDate
+            );
+        const spot = number(
+            item.ltp,
+            number(item.timeframes?.[timeframe]?.ltp)
+        );
+        const baseline = number(candles[0]?.close);
+        const points = baseline !== null && baseline > 0
+            ? candles.map(candle => ({
+                time: candle.time,
+                value: (Number(candle.close) / baseline - 1) * 100
+            }))
+            : [];
+        if (
+            points.length
+            && timeframe !== "Daily"
+            && isRecentOpenSnapshot
+            && spot !== null
+            && currentTime > points[points.length - 1].time
+        ) {
+            points.push({
+                time: currentTime,
+                value: (spot / baseline - 1) * 100
+            });
+        }
+        const sessionChange = spot !== null && baseline !== null && baseline > 0
+            ? (spot / baseline - 1) * 100
+            : points.length
+                ? points[points.length - 1].value
+                : null;
+        const levels = crossIndexLevels(item, spot, sessionDate);
+        const nearSupport = levels.supportDistance !== null
+            && levels.supportDistance <= CROSS_INDEX_LEVEL_THRESHOLD_PCT;
+        const nearResistance = levels.resistanceDistance !== null
+            && levels.resistanceDistance <= CROSS_INDEX_LEVEL_THRESHOLD_PCT;
+
+        rows.push({
+            name,
+            displayName: name === "Nifty 100"
+                ? "Nifty 100 (Large Cap)"
+                : name,
+            color: CROSS_INDEX_COLORS[name],
+            spot,
+            sessionChange,
+            levels,
+            nearSupport,
+            nearResistance,
+            hasCandles: points.length > 0
+        });
+        if (points.length) {
+            lineData.push({
+                name,
+                color: CROSS_INDEX_COLORS[name],
+                points,
+                baseline,
+                levels
+            });
+        }
+    }
+
+    const nearSupportCount = rows.filter(row => row.nearSupport).length;
+    const nearResistanceCount = rows.filter(row => row.nearResistance).length;
+    const signal = crossIndexSignal(rows);
+    const scalp = data.strategy?.scalp_opportunity || {};
+    const scalpDecision = ["BUY ATM CE", "BUY ATM PE"].includes(scalp.decision)
+        ? scalp.decision
+        : "WAIT";
+    const scalpDirection = scalpDecision.endsWith("CE")
+        ? "bullish"
+        : scalpDecision.endsWith("PE")
+            ? "bearish"
+            : "neutral";
+    if (crossSummary) {
+        crossSummary.innerHTML = `
+            <section class="cross-index-signal is-${scalpDirection}" aria-live="polite">
+                <div class="cross-index-signal-heading">
+                    <span class="cross-index-signal-label">NIFTY 50 ATM · 15-MIN SCALP</span>
+                    <strong>${escapeHtml(scalpDecision)}</strong>
+                </div>
+                <p>${escapeHtml(scalp.reason || "Scalp entry conditions are not confirmed.")}</p>
+            </section>
+            <section class="cross-index-signal is-${signal.direction}">
+                <div class="cross-index-signal-heading">
+                    <span class="cross-index-signal-label">CROSS-INDEX LEVEL CONFLUENCE</span>
+                    <strong>${escapeHtml(signal.action)}</strong>
+                </div>
+                <p>${escapeHtml(signal.explanation)} This is level context, not an entry signal by itself.</p>
+            </section>
+            <p class="cross-index-note">
+                Lines show each index's change from its first ${escapeHtml(timeframeLabel)} candle close, so crossovers are comparable despite different point scales. Spot prices stay in index points below. Key levels include session and previous-day highs/lows, 5- and 7-session ranges, pivots, and 15m/30m/1H/Daily moving averages. “Near” means within ${CROSS_INDEX_LEVEL_THRESHOLD_PCT.toFixed(2)}%.
+                Decision cards use the latest captured snapshot whether or not the market is open; they are not live quotes.
+            </p>
+            <p class="cross-index-note">
+                Near a level now: ${nearSupportCount} index${nearSupportCount === 1 ? "" : "es"} at support · ${nearResistanceCount} at resistance.
+            </p>
+            <div class="cross-index-table-wrap">
+                <table class="cross-index-table">
+                    <thead>
+                        <tr>
+                            <th>Index / line</th>
+                            <th>Spot LTP</th>
+                            <th>From first close</th>
+                            <th>Nearest support</th>
+                            <th>Nearest resistance</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(row => {
+                            const levelCell = (level, distance, near) => {
+                                if (!level) return "--";
+                                return `${escapeHtml(level.name)} ${formatNumber(level.price, 2)} · ${formatNumber(distance, 2)}%${near ? " · NEAR" : ""}`;
+                            };
+                            return `
+                                <tr>
+                                    <td>
+                                        <span class="cross-index-name">
+                                            <i class="cross-index-swatch" style="background:${row.color}"></i>
+                                            ${escapeHtml(row.displayName)}${row.hasCandles ? "" : " · no candles"}
+                                        </span>
+                                    </td>
+                                    <td>${formatNumber(row.spot, 2)}</td>
+                                    <td class="${row.sessionChange === null ? "" : row.sessionChange >= 0 ? "positive" : "negative"}">${formatPercent(row.sessionChange)}</td>
+                                    <td>${levelCell(row.levels.support, row.levels.supportDistance, row.nearSupport)}</td>
+                                    <td>${levelCell(row.levels.resistance, row.levels.resistanceDistance, row.nearResistance)}</td>
+                                </tr>
+                            `;
+                        }).join("")}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    setText(
+        "candleCount",
+        `${lineData.length} of ${CROSS_INDEX_ORDER.length} index lines · ${timeframeLabel}`
+    );
+
+    if (!lineData.length) {
+        if (priceContainer) {
+            priceContainer.innerHTML = `
+                <div class="chart-placeholder">
+                    No ${escapeHtml(timeframeLabel)} index candles are available for the cross-index comparison.
+                </div>
+            `;
+        }
+        return;
+    }
+    if (!window.LightweightCharts) {
+        if (priceContainer) {
+            priceContainer.innerHTML =
+                '<div class="chart-placeholder">Chart library unavailable. Refresh the page or check your connection.</div>';
+        }
+        return;
+    }
+
+    const chart = addChart(priceContainer, { height: 360 });
+    if (!chart) return;
+    chart.applyOptions({
+        localization: {
+            priceFormatter: value => `${Number(value).toFixed(2)}%`
+        }
+    });
+
+    let referenceSeries = null;
+    for (const item of lineData) {
+        const series = chart.addLineSeries({
+            color: item.color,
+            lineWidth: 2,
+            title: item.name,
+            priceFormat: {
+                type: "custom",
+                minMove: 0.01,
+                formatter: value => `${Number(value).toFixed(2)}%`
+            },
+            priceLineVisible: false,
+            lastValueVisible: true
+        });
+        series.setData(item.points);
+        if (!referenceSeries) referenceSeries = series;
+    }
+    referenceSeries?.createPriceLine({
+        price: 0,
+        color: "rgba(148,163,184,0.65)",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: "Session baseline"
+    });
+    chart.timeScale().fitContent();
 }
 
 function clearCharts() {
@@ -1263,6 +1712,30 @@ function syncChartTimeScales() {
 function renderChart() {
     const data = state.data;
     if (!data) return;
+
+    if (state.selectedIndex === "CrossIndex") {
+        renderCrossIndexChart(data);
+        return;
+    }
+
+    const indexSelect = $("indexSelect");
+    const indexSelectLabel = $("indexSelectLabel");
+    const singleSummary = $("singleIndexSummary");
+    const chartLegend = $("chartLegend");
+    const crossSummary = $("crossIndexSummary");
+    const volumeHeading = $("volumeHeading");
+    const volumeChartContainer = $("volumeChart");
+    const rsiHeading = $("rsiHeading");
+    const rsiChartContainer = $("rsiChart");
+    if (indexSelect) indexSelect.hidden = false;
+    if (indexSelectLabel) indexSelectLabel.hidden = false;
+    if (singleSummary) singleSummary.hidden = false;
+    if (chartLegend) chartLegend.hidden = false;
+    if (crossSummary) crossSummary.hidden = true;
+    if (volumeHeading) volumeHeading.hidden = false;
+    if (volumeChartContainer) volumeChartContainer.hidden = false;
+    if (rsiHeading) rsiHeading.hidden = false;
+    if (rsiChartContainer) rsiChartContainer.hidden = false;
 
     const indexData = data.indices?.[state.selectedIndex];
 

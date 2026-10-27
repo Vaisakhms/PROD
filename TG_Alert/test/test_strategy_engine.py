@@ -7,14 +7,98 @@ from strategy_engine import (
     _all_confirm_direction,
     _leg_bias,
     _level_veto,
+    _main_strategy_plan,
     _oi_state,
+    _scalp_opportunity,
+    _support_watch,
     _trend,
     _trigger,
     evaluate_strategy,
 )
 
+INDEX_NAMES = ("Nifty 50", "Bank Nifty", "Nifty 100", "Nifty Midcap")
+
+
+def snapshot_setup(direction="CE"):
+    spot = 100.1 if direction == "CE" else 99.9
+    candle = (
+        {"open": 100.0, "high": 100.2, "low": 99.95, "close": 100.1}
+        if direction == "CE"
+        else {"open": 100.0, "high": 100.05, "low": 99.8, "close": 99.9}
+    )
+    side = "support" if direction == "CE" else "resistance"
+    indices = {
+        name: {
+            "frames": {
+                "15m": {"analysis": {"close": spot}},
+                "3m": {"candles": [candle]},
+            }
+        }
+        for name in INDEX_NAMES
+    }
+    levels = {
+        name: [{"name": "Decision level", "price": 100, "side": side}]
+        for name in INDEX_NAMES
+    }
+    options = {
+        "spot": spot,
+        "atm": 100,
+        "ce": {"ltp": 10},
+        "pe": {"ltp": 11},
+    }
+    return indices, levels, options
+
 
 class StrategyRuleTests(unittest.TestCase):
+    def test_support_watch_requires_nifty_and_another_index_near_support(self):
+        indices = {
+            "Nifty 50": {"frames": {"15m": {"analysis": {"close": 100.2}}}},
+            "Bank Nifty": {"frames": {"15m": {"analysis": {"close": 200.4}}}},
+            "Nifty Midcap": {"frames": {"15m": {"analysis": {"close": 310}}}},
+            "Nifty 100": {"frames": {"15m": {"analysis": {"close": 420}}}},
+        }
+        levels = {
+            "Nifty 50": [{"name": "S1", "price": 100, "side": "support"}],
+            "Bank Nifty": [{"name": "S1", "price": 200, "side": "support"}],
+            "Nifty Midcap": [{"name": "S1", "price": 300, "side": "support"}],
+            "Nifty 100": [{"name": "S1", "price": 400, "side": "support"}],
+        }
+
+        watch = _support_watch(indices, levels, {})
+
+        self.assertEqual(watch["status"], "SUPPORT WATCH")
+        self.assertTrue(watch["active"])
+        self.assertEqual(watch["near_count"], 2)
+        self.assertEqual(watch["near_indices"], ["Nifty 50", "Bank Nifty"])
+
+    def test_nifty_support_breakdown_invalidates_support_watch(self):
+        indices = {
+            name: {"frames": {"15m": {"analysis": {"close": 100.1}}}}
+            for name in ("Nifty 50", "Bank Nifty", "Nifty Midcap", "Nifty 100")
+        }
+        levels = {
+            name: [{"name": "S1", "price": 100, "side": "support"}]
+            for name in indices
+        }
+        events = {
+            "Nifty 50": {
+                "kind": "support breakdown",
+                "level": {"name": "S1", "price": 100},
+            }
+        }
+
+        watch = _support_watch(indices, levels, events)
+
+        self.assertEqual(watch["status"], "INVALIDATED")
+        self.assertFalse(watch["active"])
+        self.assertEqual(watch["nifty_status"], "BROKEN")
+
+    def test_support_watch_is_unavailable_without_index_data(self):
+        watch = _support_watch({}, {}, {})
+
+        self.assertEqual(watch["status"], "UNAVAILABLE")
+        self.assertFalse(watch["active"])
+
     def test_level_setups_accept_different_confirmation_types_in_same_direction(self):
         events = {
             "Nifty 50": {"direction": "CE", "kind": "support hold"},
@@ -228,6 +312,97 @@ class StrategyRuleTests(unittest.TestCase):
         self.assertIn("required_data", decision["entry_filters"])
         self.assertFalse(decision["entry_filters"]["required_data"])
 
+    def test_snapshot_scalp_buys_call_or_put_on_cross_index_reversal(self):
+        for direction in ("CE", "PE"):
+            with self.subTest(direction=direction):
+                indices, levels, options = snapshot_setup(direction)
+                opportunity = _scalp_opportunity(indices, levels, options)
+                self.assertEqual(opportunity["decision"], "BUY ATM " + direction)
+                self.assertEqual(opportunity["duration_minutes"], 15)
+                self.assertIsNotNone(opportunity["invalidation_level"])
+                self.assertEqual(
+                    len(opportunity["level_confirmations"]), len(INDEX_NAMES)
+                )
+
+    def test_snapshot_scalp_waits_for_reversal_and_valid_atm_premium(self):
+        indices, levels, options = snapshot_setup()
+        indices["Nifty 50"]["frames"]["3m"]["candles"] = [
+            {"open": 99.9, "high": 100.0, "low": 99.8, "close": 99.9}
+        ]
+        self.assertEqual(
+            _scalp_opportunity(indices, levels, options)["decision"], "WAIT"
+        )
+
+        indices, levels, options = snapshot_setup()
+        options["ce"]["ltp"] = 0
+        self.assertEqual(
+            _scalp_opportunity(indices, levels, options)["decision"], "WAIT"
+        )
+
+    def test_snapshot_scalp_waits_when_level_sides_are_split(self):
+        indices, levels, options = snapshot_setup()
+        levels["Nifty Midcap"] = [
+            {"name": "Resistance", "price": 100.2, "side": "resistance"}
+        ]
+        opportunity = _scalp_opportunity(indices, levels, options)
+        self.assertEqual(opportunity["decision"], "WAIT")
+        self.assertIn("split", opportunity["reason"])
+
+    def test_dual_nearby_levels_do_not_hide_clear_support_confluence(self):
+        indices, levels, options = snapshot_setup()
+        for name in ("Nifty 50", "Nifty 100"):
+            levels[name].append({
+                "name": "Nearby resistance",
+                "price": 100.2,
+                "side": "resistance",
+            })
+        opportunity = _scalp_opportunity(indices, levels, options)
+        self.assertEqual(opportunity["decision"], "BUY ATM CE")
+
+    def test_snapshot_scalp_prefers_ltp_to_the_last_candle_close(self):
+        indices, levels, options = snapshot_setup()
+        for item in indices.values():
+            item["frames"]["15m"]["analysis"]["ltp"] = 101
+        opportunity = _scalp_opportunity(indices, levels, options)
+        self.assertEqual(opportunity["decision"], "WAIT")
+
+    def test_main_strategy_uses_three_of_five_and_requires_15m_confirmation(self):
+        indices, levels, options = snapshot_setup()
+        scalp = _scalp_opportunity(indices, levels, options)
+        events = {"Nifty 50": {"kind": "support hold", "direction": "CE"}}
+        plan = _main_strategy_plan(
+            indices, levels, events, 15, None, {"direction": None}
+        )
+        self.assertEqual(plan["score"], 3)
+        self.assertEqual(plan["decision"], "BUY ATM CE")
+
+        below_threshold = _main_strategy_plan(
+            indices, levels, events, 0, None, {"direction": None}
+        )
+        self.assertEqual(below_threshold["score"], 2)
+        self.assertEqual(below_threshold["decision"], "WAIT")
+
+        plan = _main_strategy_plan(
+            indices, levels, {}, 15, None, scalp
+        )
+        self.assertEqual(plan["decision"], "WAIT")
+        self.assertFalse(plan["price_confirmed"])
+
+    def test_main_strategy_waits_when_scalp_opposes_cross_index_direction(self):
+        indices, levels, options = snapshot_setup()
+        opposing_scalp = {"direction": "PE"}
+        plan = _main_strategy_plan(
+            indices,
+            levels,
+            {"Nifty 50": {"kind": "support hold", "direction": "CE"}},
+            15,
+            None,
+            opposing_scalp,
+        )
+        self.assertEqual(plan["decision"], "WAIT")
+        self.assertIn("opposite", plan["reason"])
+
+    @unittest.skip("Replaced by snapshot-based scalp rules above.")
     def test_scalp_signal_can_appear_while_main_strategy_waits(self):
         now = datetime.datetime(2026, 10, 23, 10, 0, tzinfo=datetime.timezone(
             datetime.timedelta(hours=5, minutes=30)
@@ -276,6 +451,7 @@ class StrategyRuleTests(unittest.TestCase):
             decision["scalp_opportunity"]["decision"], "BUY ATM CE"
         )
 
+    @unittest.skip("Trend and expiry-day gates were removed from the scalp plan.")
     def test_scalp_signal_rejects_opposing_trend_and_expiry_day(self):
         now = datetime.datetime(2026, 10, 23, 10, 0, tzinfo=datetime.timezone(
             datetime.timedelta(hours=5, minutes=30)
@@ -340,7 +516,232 @@ class StrategyRuleTests(unittest.TestCase):
         self.assertEqual(decision["scalp_opportunity"]["decision"], "WAIT")
         self.assertIn("Expiry-day", decision["scalp_opportunity"]["reason"])
 
-    def test_valid_aligned_setup_can_emit_atm_call_signal(self):
+    @unittest.skip("Replaced by cross-index level-confluence scalp tests.")
+    def test_expiry_day_support_bounce_needs_broad_support_confirmation(self):
+        now = datetime.datetime(2026, 10, 27, 10, 0, tzinfo=datetime.timezone(
+            datetime.timedelta(hours=5, minutes=30)
+        ))
+        frames = {
+            "3m": {
+                "candles": [
+                    {"time": now.timestamp() - 240, "open": 101.0,
+                     "high": 101.5, "low": 100.8, "close": 101.0,
+                     "sma20": 101.0},
+                    {"time": now.timestamp() - 60, "open": 100.7,
+                     "high": 101.1, "low": 100.4, "close": 100.9,
+                     "sma20": 101.2},
+                ]
+            },
+            "5m": {
+                "analysis": {"close": 100.9, "sma": {20: 101, 50: 100}},
+                "candles": [{"time": now.timestamp() - 60}],
+            },
+            "15m": {
+                "analysis": {"close": 100.9, "sma": {20: 101, 50: 100}},
+                "candles": [],
+            },
+        }
+        nifty = {"frames": frames}
+        options = {
+            "source": "Fyers",
+            "spot_live": True,
+            "captured_at": now.isoformat(),
+            "expiry_date": "2026-10-27",
+            "spot": 100.9,
+            "atm": 100,
+            "ce": {"ltp": 10},
+        }
+        support = {
+            "direction": "CE",
+            "kind": "support hold",
+            "level": {"price": 100.5},
+        }
+        broad_support = {
+            "Nifty 50": support,
+            "Bank Nifty": support,
+            "Nifty Midcap": support,
+        }
+
+        opportunity = _scalp_opportunity(
+            now,
+            nifty,
+            options,
+            65,
+            broad_support,
+        )
+
+        self.assertEqual(opportunity["decision"], "BUY ATM CE", opportunity)
+        self.assertEqual(
+            opportunity["support_confirmations"],
+            ["Nifty 50", "Bank Nifty", "Nifty Midcap"],
+        )
+
+        weak_support = {
+            "Nifty 50": support,
+            "Bank Nifty": support,
+        }
+        opportunity = _scalp_opportunity(
+            now,
+            nifty,
+            options,
+            65,
+            weak_support,
+        )
+        self.assertEqual(opportunity["decision"], "WAIT")
+        self.assertIn("3 of 4", opportunity["reason"])
+
+    @unittest.skip("Replaced by snapshot-based 3m reversal tests.")
+    def test_expiry_day_support_bounce_requires_reclaim_and_rejection(self):
+        now = datetime.datetime(2026, 10, 27, 10, 0, tzinfo=datetime.timezone(
+            datetime.timedelta(hours=5, minutes=30)
+        ))
+        nifty = {
+            "frames": {
+                "3m": {
+                    "candles": [
+                        {"time": now.timestamp() - 240, "high": 101.5},
+                        {"time": now.timestamp() - 60, "open": 100.7,
+                         "high": 101.1, "low": 100.4, "close": 100.4,
+                         "sma20": 101.2},
+                    ]
+                },
+                "5m": {
+                    "analysis": {"close": 100.9, "sma": {20: 101, 50: 100}},
+                    "candles": [{"time": now.timestamp() - 60}],
+                },
+                "15m": {
+                    "analysis": {"close": 100.9, "sma": {20: 101, 50: 100}},
+                },
+            }
+        }
+        options = {
+            "source": "Fyers",
+            "spot_live": True,
+            "captured_at": now.isoformat(),
+            "expiry_date": "2026-10-27",
+            "spot": 100.9,
+            "atm": 100,
+            "ce": {"ltp": 10},
+        }
+        support = {
+            "direction": "CE",
+            "kind": "support hold",
+            "level": {"price": 100.5},
+        }
+        events = {
+            "Nifty 50": support,
+            "Bank Nifty": support,
+            "Nifty Midcap": support,
+        }
+
+        opportunity = _scalp_opportunity(
+            now,
+            nifty,
+            options,
+            65,
+            events,
+        )
+
+        self.assertEqual(opportunity["decision"], "WAIT")
+        self.assertIn("3m support bounce", opportunity["reason"])
+
+        candles = nifty["frames"]["3m"]["candles"]
+        candles[0] = {
+            "time": now.timestamp() - 240,
+            "open": 101.1,
+            "high": 101.5,
+            "low": 101.0,
+            "close": 101.2,
+            "sma20": 101.2,
+        }
+        candles[1]["close"] = 100.9
+        candles[1]["sma20"] = 101.2
+        opportunity = _scalp_opportunity(
+            now,
+            nifty,
+            options,
+            65,
+            events,
+        )
+        self.assertEqual(opportunity["decision"], "WAIT")
+        self.assertIn("breakdown", opportunity["reason"])
+
+    def test_strategy_uses_multi_index_support_holds_for_expiry_day_scalp(self):
+        now = datetime.datetime(2026, 10, 27, 10, 0, tzinfo=datetime.timezone(
+            datetime.timedelta(hours=5, minutes=30)
+        ))
+        indices = {}
+        for name in (
+            "Nifty 50", "Bank Nifty", "Nifty Midcap", "Nifty 100"
+        ):
+            indices[name] = {
+                "pivots": {"S1": 100.5},
+                "frames": {
+                    "3m": {
+                        "candles": [
+                            {"time": now.timestamp() - 240, "open": 101.0,
+                             "high": 101.0, "low": 100.5, "close": 100.9,
+                             "sma20": 101.0},
+                            {"time": now.timestamp() - 60, "open": 100.7,
+                             "high": 100.8, "low": 100.4, "close": 100.6,
+                             "sma20": 101.0},
+                        ]
+                    },
+                    "5m": {
+                        "analysis": {
+                            "close": 100.6,
+                            "sma": {20: 101, 50: 100},
+                        },
+                        "candles": [{"time": now.timestamp() - 60}],
+                    },
+                    "15m": {
+                        "analysis": {
+                            "close": 100.6,
+                            "sma": {20: 101, 50: 100},
+                        },
+                        "candles": [{
+                            "time": now.timestamp() - 60,
+                            "open": 100.7,
+                            "high": 100.8,
+                            "low": 100.3,
+                            "close": 100.6,
+                        }],
+                    },
+                },
+            }
+        options = {
+            "source": "Fyers",
+            "spot_live": True,
+            "captured_at": now.isoformat(),
+            "expiry_date": "2026-10-27",
+            "spot": 100.6,
+            "atm": 100,
+            "ce": {"ltp": 10},
+        }
+
+        decision, _ = evaluate_strategy(
+            now=now,
+            indices=indices,
+            pivots={"S1": 100.5},
+            options=options,
+            previous=None,
+            state={},
+            market_bias=0,
+            account_size=None,
+            lot_size=65,
+        )
+
+        self.assertEqual(
+            decision["scalp_opportunity"]["decision"],
+            "BUY ATM CE",
+            decision["scalp_opportunity"],
+        )
+        self.assertEqual(
+            len(decision["scalp_opportunity"]["level_confirmations"]),
+            4,
+        )
+
+    def test_legacy_entry_does_not_override_main_strategy_confluence(self):
         now = datetime.datetime(2026, 10, 23, 10, 0, tzinfo=datetime.timezone(
             datetime.timedelta(hours=5, minutes=30)
         ))
@@ -443,10 +844,42 @@ class StrategyRuleTests(unittest.TestCase):
             account_size=100000,
             lot_size=65,
         )
-        self.assertEqual(decision["decision"], "BUY ATM CE", decision)
+        self.assertEqual(decision["decision"], "WAIT", decision)
+        self.assertEqual(decision["legacy_entry_decision"], "WAIT")
         self.assertEqual(decision["trigger_3m"], "Bullish")
-        self.assertIsNotNone(next_state["open_position"])
-        self.assertEqual(next_state["open_position"]["quantity"], 65)
+        self.assertIsNone(next_state.get("open_position"))
+
+    def test_snapshot_strategy_is_calculated_after_market_hours(self):
+        indices, _, options = snapshot_setup()
+        for name in INDEX_NAMES:
+            indices[name]["pivots"] = {"S1": 100}
+            indices[name]["frames"]["15m"]["candles"] = [
+                {
+                    "time": 1,
+                    "open": 100.0,
+                    "high": 100.2,
+                    "low": 99.95,
+                    "close": 100.1,
+                }
+            ]
+        now = datetime.datetime(
+            2026, 10, 23, 18, 0,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)),
+        )
+        decision, next_state = evaluate_strategy(
+            now=now,
+            indices=indices,
+            pivots={"S1": 100},
+            options=options,
+            previous=None,
+            state={},
+            market_bias=15,
+            account_size=100000,
+            lot_size=25,
+        )
+        self.assertEqual(decision["scalp_opportunity"]["decision"], "BUY ATM CE")
+        self.assertEqual(decision["main_strategy"]["decision"], "BUY ATM CE")
+        self.assertIsNone(next_state["open_position"])
 
     def test_stop_exit_updates_daily_risk_state(self):
         now = datetime.datetime(2026, 10, 23, 10, 0, tzinfo=datetime.timezone(

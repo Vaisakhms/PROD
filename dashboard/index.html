@@ -25,7 +25,7 @@
         rel="stylesheet"
     >
 
-    <link rel="stylesheet" href="./styles.css?v=live-data-6">
+    <link rel="stylesheet" href="./styles.css?v=practical-strategy-1">
 
     <!-- Lightweight Charts for interactive candlestick charts -->
     <script
@@ -33,7 +33,7 @@
         src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"
     ></script>
 
-    <script defer src="./app.js?v=live-data-6"></script>
+    <script defer src="./app.js?v=practical-strategy-1"></script>
 </head>
 
 <body>
@@ -218,15 +218,17 @@
 
                     <div class="chart-controls">
 
-                        <label class="sr-only" for="indexSelect">
+                        <label id="indexSelectLabel" class="sr-only" for="indexSelect">
                             Select market index
                         </label>
 
                         <select id="indexSelect" class="control-select">
                             <option value="Nifty 50">Nifty 50</option>
                             <option value="Bank Nifty">Bank Nifty</option>
+                            <option value="Nifty 100">Nifty 100 (Large Cap)</option>
                             <option value="Nifty Midcap">Nifty Midcap</option>
-                            <option value="Nifty 100">Nifty 100</option>
+                            <option value="Sensex">Sensex</option>
+                            <option value="CrossIndex">CrossIndex (All Indices)</option>
                         </select>
 
                         <div
@@ -255,7 +257,7 @@
 
                     <div class="chart-summary">
 
-                        <div>
+                        <div id="singleIndexSummary">
                             <span id="chartInstrument" class="chart-instrument">
                                 Nifty 50
                             </span>
@@ -268,7 +270,7 @@
                             </div>
                         </div>
 
-                        <div class="chart-legend">
+                        <div class="chart-legend" id="chartLegend">
                             <span><i class="legend-dot sma20"></i>SMA 20</span>
                             <span><i class="legend-dot sma50"></i>SMA 50</span>
                             <span><i class="legend-dot sma100"></i>SMA 100</span>
@@ -276,20 +278,22 @@
 
                     </div>
 
+                    <div id="crossIndexSummary" class="cross-index-summary" aria-live="polite" hidden></div>
+
                     <div id="priceChart" class="price-chart">
                         <div class="chart-placeholder">
                             Loading chart...
                         </div>
                     </div>
 
-                    <div class="chart-subheading">
+                    <div class="chart-subheading" id="volumeHeading">
                         <span>VOLUME</span>
                         <span id="volumeLabel">Trading activity</span>
                     </div>
 
                     <div id="volumeChart" class="volume-chart"></div>
 
-                    <div class="chart-subheading">
+                    <div class="chart-subheading" id="rsiHeading">
                         <span>RELATIVE STRENGTH INDEX</span>
                         <span>RSI 14</span>
                     </div>
