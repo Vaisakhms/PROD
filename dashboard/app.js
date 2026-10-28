@@ -1190,6 +1190,7 @@ const CROSS_INDEX_COLORS = {
 };
 
 const CROSS_INDEX_LEVEL_THRESHOLD_PCT = 0.30;
+const CROSS_INDEX_INTRADAY_SESSIONS = 5;
 
 function crossIndexLevels(indexData, spot, sessionDate) {
     const levels = [];
@@ -1414,16 +1415,23 @@ function renderCrossIndexChart(data) {
     for (const name of CROSS_INDEX_ORDER) {
         const item = data.indices?.[name] || {};
         const allCandles = validCandles(item.charts?.[timeframe] || []);
-        const candles = timeframe === "Daily"
-            ? allCandles
-            : allCandles.filter(candle =>
-                !sessionDate || marketDate(candle.time) === sessionDate
+        let candles = allCandles;
+        let latestSessionBaseline = null;
+        if (timeframe !== "Daily" && allCandles.length) {
+            const dates = [...new Set(allCandles.map(c => marketDate(c.time)))];
+            const windowDates = new Set(dates.slice(-CROSS_INDEX_INTRADAY_SESSIONS));
+            candles = allCandles.filter(c => windowDates.has(marketDate(c.time)));
+            const latestDate = dates[dates.length - 1];
+            latestSessionBaseline = number(
+                allCandles.find(c => marketDate(c.time) === latestDate)?.close
             );
+        }
         const spot = number(
             item.ltp,
             number(item.timeframes?.[timeframe]?.ltp)
         );
         const baseline = number(candles[0]?.close);
+        const changeBaseline = latestSessionBaseline ?? baseline;
         const points = baseline !== null && baseline > 0
             ? candles.map(candle => ({
                 time: candle.time,
@@ -1442,8 +1450,8 @@ function renderCrossIndexChart(data) {
                 value: (spot / baseline - 1) * 100
             });
         }
-        const sessionChange = spot !== null && baseline !== null && baseline > 0
-            ? (spot / baseline - 1) * 100
+        const sessionChange = spot !== null && changeBaseline !== null && changeBaseline > 0
+            ? (spot / changeBaseline - 1) * 100
             : points.length
                 ? points[points.length - 1].value
                 : null;
@@ -1506,7 +1514,7 @@ function renderCrossIndexChart(data) {
                 <p>${escapeHtml(signal.explanation)} This is level context, not an entry signal by itself.</p>
             </section>
             <p class="cross-index-note">
-                Lines show each index's change from its first ${escapeHtml(timeframeLabel)} candle close, so crossovers are comparable despite different point scales. Spot prices stay in index points below. Key levels include session and previous-day highs/lows, 5- and 7-session ranges, pivots, and 15m/30m/1H/Daily moving averages. “Near” means within ${CROSS_INDEX_LEVEL_THRESHOLD_PCT.toFixed(2)}%.
+                Lines show each index's change from the first ${escapeHtml(timeframeLabel)} candle close of the window${timeframe === "Daily" ? "" : ` (last ${CROSS_INDEX_INTRADAY_SESSIONS} trading sessions)`}, so crossovers are comparable despite different point scales. The table's “From first close” is the change since the latest session's first candle. Spot prices stay in index points below. Key levels include session and previous-day highs/lows, 5- and 7-session ranges, pivots, and 15m/30m/1H/Daily moving averages. “Near” means within ${CROSS_INDEX_LEVEL_THRESHOLD_PCT.toFixed(2)}%.
                 Decision cards use the latest captured snapshot whether or not the market is open; they are not live quotes.
             </p>
             <p class="cross-index-note">
@@ -1933,9 +1941,14 @@ function renderChart() {
         }
     }
 
-    // Show the latest 60 candles initially; older candles remain accessible by zooming out.
+    // Initially show about five trading days of candles for intraday timeframes
+    // (NSE session = 375 minutes); older candles remain accessible by scrolling.
+    const timeframeMinutes = { "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60 };
+    const initialCandles = timeframeMinutes[timeframe]
+        ? Math.round((375 / timeframeMinutes[timeframe]) * 5)
+        : 60;
     const visibleRange = {
-        from: Math.max(0, candles.length - 60),
+        from: Math.max(0, candles.length - initialCandles),
         to: candles.length + 1
     };
 
