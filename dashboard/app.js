@@ -2090,12 +2090,24 @@ async function loadDashboard(showMessage = false) {
         refreshButton.classList.add("loading");
     }
 
-    setText("dataStatus", "Loading data");
+    if (showMessage || !state.data) {
+        setText("dataStatus", "Loading data");
+    }
 
     try {
         const data = await fetchJson(DATA_URL);
+        const changed = !state.data
+            || data.generated_at !== state.data.generated_at;
 
-        renderDashboard(data);
+        if (changed || showMessage) {
+            renderDashboard(data);
+        } else {
+            setText("dataStatus", "Data loaded");
+        }
+
+        if (changed && !showMessage) {
+            renderHistory();
+        }
 
         if (showMessage) {
             showToast("Latest market data loaded.");
@@ -2223,11 +2235,15 @@ function startDashboard() {
     loadDashboard(false);
     renderHistory();
 
-    // Refresh the published JSON every five minutes.
+    // Poll the published JSON every minute while the tab is visible.
     // This does not trigger a new GitHub Actions data collection.
     window.setInterval(() => {
-        loadDashboard(false);
-    }, 5 * 60 * 1000);
+        if (!document.hidden) loadDashboard(false);
+    }, 60 * 1000);
+
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) loadDashboard(false);
+    });
 }
 
 if (document.readyState === "loading") {
