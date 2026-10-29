@@ -1178,6 +1178,96 @@ a:hover {
     gap: 16px;
 }
 
+.options-cards-grid[hidden],
+.options-ladder[hidden] {
+    display: none;
+}
+
+.options-ladder {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.ladder-row {
+    display: grid;
+    grid-template-columns: 90px repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: stretch;
+}
+
+.ladder-row.atm .option-card {
+    border-color: var(--blue);
+}
+
+.ladder-strike {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+
+.ladder-strike strong {
+    font-size: 16px;
+}
+
+.ladder-row .option-card {
+    padding: 14px;
+}
+
+.ladder-summary {
+    margin-bottom: 14px;
+    padding: 18px;
+}
+
+.ladder-reasons {
+    margin: 10px 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.momentum-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+    margin: 12px 0;
+}
+
+.momentum-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+}
+
+.momentum-alert {
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--yellow);
+}
+
+.momentum-alert.up { color: var(--green); }
+.momentum-alert.down { color: var(--red); }
+
+.momentum-row {
+    font-size: 11px;
+}
+
+@media (max-width: 900px) {
+    .ladder-row {
+        grid-template-columns: 1fr;
+    }
+
+    .ladder-strike {
+        flex-direction: row;
+        align-items: baseline;
+    }
+}
+
 .option-card {
     padding: 20px;
 
@@ -1446,6 +1536,137 @@ a:hover {
 
     color: var(--muted-light);
     font-size: 11px;
+}
+
+/* Gap outlook */
+.gap-outlook[hidden],
+.gap-alert[hidden] {
+    display: none;
+}
+
+.gap-outlook {
+    margin-bottom: 18px;
+    padding: 18px;
+}
+
+.gap-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin: 10px 0;
+}
+
+.gap-label {
+    font-size: 22px;
+    font-weight: 800;
+}
+
+.gap-label.positive { color: var(--green); }
+.gap-label.negative { color: var(--red); }
+
+.gap-score {
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.gap-alert {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border-radius: var(--radius-small);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.5;
+    background: rgba(247, 200, 106, 0.12);
+    color: var(--yellow);
+}
+
+.gap-alert.critical.down {
+    background: var(--red-soft);
+    color: var(--red);
+}
+
+.gap-alert.critical.up {
+    background: var(--green-soft);
+    color: var(--green);
+}
+
+.gap-signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.gap-signal {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--radius-small);
+    font-size: 12px;
+}
+
+.gap-signal.bullish { border-left-color: var(--green); }
+.gap-signal.bearish { border-left-color: var(--red); }
+.gap-signal.neutral { border-left-color: var(--muted); }
+
+.gap-signal-note {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.gap-subhead {
+    margin: 14px 0 8px;
+    font-size: 13px;
+}
+
+.gap-news-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+}
+
+.gap-news-title {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.gap-news-title a {
+    color: var(--text);
+}
+
+.gap-news-title a:hover {
+    color: var(--blue);
+}
+
+.impact-badge {
+    flex: 0 0 auto;
+    min-width: 36px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--yellow);
+    background: rgba(247, 200, 106, 0.12);
+}
+
+.impact-badge.bullish {
+    color: var(--green);
+    background: var(--green-soft);
+}
+
+.impact-badge.bearish {
+    color: var(--red);
+    background: var(--red-soft);
 }
 
 .news-grid {

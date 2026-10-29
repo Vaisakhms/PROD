@@ -27,7 +27,7 @@
         rel="stylesheet"
     >
 
-    <link rel="stylesheet" href="./styles.css?v=vaistrike-shortcuts-1">
+    <link rel="stylesheet" href="./styles.css?v=vaistrike-gap-3">
 
     <!-- Lightweight Charts for interactive candlestick charts -->
     <script
@@ -35,7 +35,7 @@
         src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"
     ></script>
 
-    <script defer src="./app.js?v=vaistrike-shortcuts-6"></script>
+    <script defer src="./app.js?v=vaistrike-gap-3"></script>
 </head>
 
 <body>
@@ -77,6 +77,7 @@
         </header>
 
         <nav class="section-nav" aria-label="Dashboard shortcuts">
+            <a href="#gapOutlook">Gap outlook</a>
             <a href="#marketOverview">Overview</a>
             <a href="#marketSnapshot">Indices</a>
             <a href="#chartAnalysis">CrossIndex</a>
@@ -111,6 +112,24 @@
 
             </section>
 
+
+            <!-- Gap outlook -->
+            <section class="panel gap-outlook" id="gapOutlook" hidden>
+                <div class="panel-topline">
+                    <span class="eyebrow" id="gapTitle">GAP OUTLOOK</span>
+                    <span class="live-badge" id="gapWeight">--</span>
+                </div>
+                <div class="gap-head">
+                    <div id="gapLabel" class="gap-label">--</div>
+                    <div id="gapScore" class="gap-score">--</div>
+                </div>
+                <div id="gapAlert" class="gap-alert" hidden></div>
+                <div id="gapGap" class="muted small-text"></div>
+                <div id="gapSignals" class="gap-signals"></div>
+                <h3 class="gap-subhead">Top 5 news (last 24h, by market impact)</h3>
+                <div id="gapNews" class="gap-news"></div>
+                <p class="muted small-text" id="gapNote"></p>
+            </section>
 
             <!-- Overall market score -->
             <section class="overall-grid" id="marketOverview">
@@ -464,6 +483,10 @@
                 <div class="section-subheading">
                     <h3>ATM Call / Put Snapshot</h3>
                 </div>
+
+                <div id="ladderSummary"></div>
+
+                <div id="optionsLadder" class="options-ladder" hidden></div>
 
                 <div id="optionsCards" class="options-cards-grid">
 

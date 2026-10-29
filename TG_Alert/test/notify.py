@@ -35,6 +35,21 @@ import yfinance as yf
 
 from fyers_apiv3 import fyersModel
 
+from gap_outlook import (
+    build_gap_outlook,
+    fetch_fii_dii,
+    fetch_gift_nifty,
+    fetch_news_digest,
+    fetch_nifty_snapshot,
+    overall_weight,
+    render_gap_outlook_lines,
+)
+from option_ladder import (
+    build_ladder,
+    ladder_momentum,
+    record_option_history,
+    summarize_ladder,
+)
 from strategy_engine import evaluate_strategy
 
 
@@ -106,6 +121,12 @@ RISK_TICKERS = [
     ("India VIX", "^INDIAVIX"),
 ]
 
+# Shown and used by the gap outlook only; not part of the global score.
+METAL_TICKERS = [
+    ("Gold", "GC=F"),
+    ("Silver", "SI=F"),
+]
+
 
 # ============================================================
 # GENERAL HELPERS
@@ -120,7 +141,7 @@ def b64(value):
 
 
 def safe_md(text):
-    return re.sub(r"[*_`$begin:math:display$$end:math:display$]", "", str(text or ""))
+    return re.sub(r"[*_`\[\]]", "", str(text or ""))
 
 
 def lakh(n):
@@ -1178,6 +1199,25 @@ def fetch_fyers_options(spot_hint):
             for option_type, item in legs.items()
         }
 
+    def ladder_leg(item, side):
+        buildup = classify_buildup(number(item, "ltpch"), number(item, "oich"))
+        return {
+            "ltp": number(item, "ltp"),
+            "ltpch": number(item, "ltpch"),
+            "oi": number(item, "oi"),
+            "oich": number(item, "oich"),
+            "buildup": buildup,
+            "bias": BUILDUP_VALUE[side][buildup],
+        }
+
+    ladder = build_ladder(strikes, atm, ladder_leg)
+    sorted_strikes = sorted(strikes)
+    strike_step = (
+        min(b - a for a, b in zip(sorted_strikes, sorted_strikes[1:]))
+        if len(sorted_strikes) > 1
+        else None
+    )
+
     return {
         "source": "Fyers",
         "captured_at": captured_at.isoformat(),
@@ -1186,6 +1226,9 @@ def fetch_fyers_options(spot_hint):
         "spot": spot,
         "spot_live": live_spot is not None and live_spot > 0,
         "atm": atm,
+        "strike_step": strike_step,
+        "ladder": ladder,
+        "ladder_summary": summarize_ladder(ladder),
         "lot_size": lot_size,
         "chain": chain_snapshot,
         "ce": ce,
@@ -1319,6 +1362,10 @@ def options_for_dashboard(options):
         "support": options.get("support"),
         "pcr_score": options.get("pcr_score"),
         "oi_score": options.get("oi_score"),
+        "strike_step": options.get("strike_step"),
+        "ladder": options.get("ladder"),
+        "ladder_summary": options.get("ladder_summary"),
+        "ladder_momentum": options.get("ladder_momentum"),
     }
 
     for option_type in ("ce", "pe"):
@@ -1334,6 +1381,59 @@ def options_for_dashboard(options):
             }
 
     return result
+
+
+def render_ladder_lines(options):
+    rows = options.get("ladder") or []
+    summary = options.get("ladder_summary")
+    if not rows or not summary:
+        return []
+
+    short = {
+        "Long buildup": "LB", "Short buildup": "SB",
+        "Short covering": "SC", "Long unwinding": "LU", "No change": "-",
+    }
+    lines = [
+        "  • *5-strike read (ATM±2)*: *%s* (score %+.0f/100)"
+        % (summary["label"], summary["score"] * 100)
+    ]
+    for reason in summary["reasons"]:
+        lines.append("    – " + reason)
+
+    lines.append("  _Strike: CE ltp/OI/ΔOI/pos | PE ltp/OI/ΔOI/pos_")
+    for row in rows:
+        ce, pe = row["ce"], row["pe"]
+        lines.append(
+            "  `%-5s %5.0f` CE %.1f/%s/%s/%s | PE %.1f/%s/%s/%s" % (
+                row["label"], row["strike"],
+                ce["ltp"], lakh(ce["oi"]), lakh(ce["oich"]),
+                short.get(ce["buildup"], "-"),
+                pe["ltp"], lakh(pe["oi"]), lakh(pe["oich"]),
+                short.get(pe["buildup"], "-"),
+            )
+        )
+
+    momentum = options.get("ladder_momentum") or {}
+    for key in ("m5", "m15"):
+        window = momentum.get(key) or {}
+        if not window.get("available"):
+            lines.append("  • %d-min change: collecting data" % window.get("minutes", 0))
+            continue
+        lines.append(
+            "  • *%d-min change*: call premiums %+.1f%% | put premiums %+.1f%% | "
+            "OI added: calls %s, puts %s"
+            % (
+                window["minutes"],
+                window["ce_premium_pct"] or 0.0,
+                window["pe_premium_pct"] or 0.0,
+                lakh(window["ce_oi_added"]),
+                lakh(window["pe_oi_added"]),
+            )
+        )
+        if window.get("alert"):
+            lines.append("    🚨 " + window["alert"]["text"])
+
+    return lines
 
 
 def render_options(options):
@@ -1393,6 +1493,8 @@ def render_options(options):
                 "%.2f" % options["zone_pcr"] if options.get("zone_pcr") is not None else "unavailable",
             )
         )
+
+        lines.extend(render_ladder_lines(options))
 
     else:
         lines.append(
@@ -1489,6 +1591,27 @@ def global_analysis():
                 % (name, format(price, ",.2f"), percentage)
             )
 
+    lines.append("*Metals* (safe-haven demand, not in the global score)")
+
+    for name, ticker in METAL_TICKERS:
+        price, percentage = yf_change(ticker)
+
+        records.append({
+            "name": name,
+            "ticker": ticker,
+            "category": "metal",
+            "price": price,
+            "change_pct": percentage,
+        })
+
+        if percentage is None:
+            lines.append("  • %s: unavailable" % name)
+        else:
+            lines.append(
+                "  • %s: %s (%+.2f%%)"
+                % (name, format(price, ",.2f"), percentage)
+            )
+
     score = None
 
     if equities or risks:
@@ -1513,147 +1636,14 @@ def global_analysis():
 # NEWS
 # ============================================================
 
-NEWS_QUERIES = [
-    'Nifty OR Sensex OR "Indian stock market"',
-    'RBI OR "Federal Reserve" OR inflation OR "interest rate"',
-    '"crude oil" OR war OR tariff OR sanctions stocks',
-    'FII OR FPI OR "foreign investors" India',
-]
-
-POS_WORDS = [
-    "rally", "rallies", "surge", "surges", "gain", "gains",
-    "jumps", "soars", "record high", "rate cut", "cools",
-    "eases", "inflow", "inflows", "upgrade", "beats",
-    "rebound", "rebounds", "recovers", "optimism",
-    "ceasefire", "bullish",
-]
-
-NEG_WORDS = [
-    "fall", "falls", "plunge", "plunges", "crash", "slump",
-    "slumps", "selloff", "sell-off", "drops", "slides",
-    "tumbles", "rate hike", "outflow", "outflows", "selling",
-    "downgrade", "fears", "recession", "war", "tariff",
-    "tariffs", "sanctions", "attack", "misses", "losses",
-    "warning", "bearish",
-]
-
-CONCERN_WORDS = [
-    "RBI", "Fed", "Federal Reserve", "war", "tariff",
-    "tariffs", "sanctions", "ceasefire", "election", "budget",
-    "GDP", "CPI", "inflation", "crude", "OPEC", "FII",
-    "FPI", "default", "rate cut", "rate hike",
-]
-
-
-def _count(words, text):
-    return sum(
-        1
-        for word in words
-        if re.search(r"\b" + re.escape(word) + r"\b", text)
-    )
-
-
 def fetch_news():
-    items = []
-    seen = set()
+    digest = fetch_news_digest()
 
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    for item in digest["items"]:
+        item["title"] = safe_md(item["title"])
+        item["source"] = safe_md(item["source"])
 
-    for query in NEWS_QUERIES:
-        url = (
-            "https://news.google.com/rss/search?q=%s"
-            "&hl=en-IN&gl=IN&ceid=IN:en"
-            % quote_plus(query + " when:1d")
-        )
-
-        try:
-            response = requests.get(
-                url,
-                timeout=15,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-
-            response.raise_for_status()
-
-            root = ET.fromstring(response.content)
-
-        except Exception as exc:
-            print("News error:", exc)
-            continue
-
-        for item in list(root.iter("item"))[:8]:
-            title = safe_md(item.findtext("title"))
-            key = title.lower()[:60]
-
-            if not title or key in seen:
-                continue
-
-            seen.add(key)
-
-            try:
-                published = email.utils.parsedate_to_datetime(
-                    item.findtext("pubDate")
-                )
-
-                if published.tzinfo is None:
-                    published = published.replace(
-                        tzinfo=datetime.timezone.utc
-                    )
-
-                age_hours = (
-                    now_utc - published.astimezone(datetime.timezone.utc)
-                ).total_seconds() / 3600
-
-            except Exception:
-                age_hours = 24
-
-            if age_hours > 30:
-                continue
-
-            low = title.lower()
-
-            sentiment = (
-                _count(POS_WORDS, low)
-                - _count(NEG_WORDS, low)
-            )
-
-            tags = [
-                word
-                for word in CONCERN_WORDS
-                if re.search(r"\b" + re.escape(word) + r"\b", title, re.I)
-            ]
-
-            link = item.findtext("link") or ""
-
-            items.append({
-                "title": title,
-                "source": safe_md(item.findtext("source") or ""),
-                "url": link,
-                "score": (sentiment > 0) - (sentiment < 0),
-                "tags": tags[:2],
-                "age": max(0, age_hours),
-            })
-
-    scored = [
-        item["score"]
-        for item in items
-        if item["score"] != 0
-    ]
-
-    score = (
-        clamp(1.5 * sum(scored) / len(scored))
-        if scored
-        else 0.0
-    )
-
-    items.sort(
-        key=lambda item: (
-            not (item["score"] or item["tags"]),
-            item["age"],
-        )
-    )
-
-    return items[:7], score if items else None
+    return digest, digest["score"]
 
 
 def render_news(items):
@@ -1662,7 +1652,7 @@ def render_news(items):
 
     output = []
 
-    for item in items:
+    for item in items[:7]:
         icon = (
             "🟢" if item["score"] > 0
             else "🔴" if item["score"] < 0
@@ -1676,17 +1666,18 @@ def render_news(items):
         )
 
         output.append(
-            "  %s %s%s _(%s)_"
+            "  %s %s%s _(%s, impact %.0f/10)_"
             % (
                 icon,
                 item["title"][:110],
                 tag,
                 item["source"],
+                item["impact"],
             )
         )
 
     output.append(
-        "  _Headline bias = keyword-based, treat as a rough guide_"
+        "  _Headline impact/bias = keyword-based, treat as a rough guide_"
     )
 
     return output
@@ -1715,6 +1706,8 @@ def build_dashboard_payload(
     live_quotes=None,
     ltp_captured_at=None,
     index_levels=None,
+    gap_outlook=None,
+    news_stats=None,
 ):
     index_data = {}
     index_levels = index_levels or {}
@@ -1753,7 +1746,9 @@ def build_dashboard_payload(
         "news": {
             "score": news_score,
             "items": news_items,
+            "stats": (news_stats or {}),
         },
+        "gap_outlook": gap_outlook,
         "scores": {
             "global_markets": global_score,
             "news_sentiment": news_score,
@@ -2138,12 +2133,60 @@ def main():
 
     global_lines, global_score, global_records = global_analysis()
 
-    news_items, news_score = fetch_news()
+    news_digest, news_score = fetch_news()
+    news_items = news_digest["items"]
+
+    futures_moves = {}
+    for futures_name, futures_ticker in (
+        ("S&P 500 Futures", "ES=F"),
+        ("Nasdaq Futures", "NQ=F"),
+    ):
+        futures_pct = yf_change(futures_ticker)[1]
+        if futures_pct is not None:
+            futures_moves[futures_name] = futures_pct
+
+    market_open = status == "OPEN"
+    nifty_snapshot = fetch_nifty_snapshot()
+    gap_outlook = build_gap_outlook(
+        now=now,
+        market_open=market_open,
+        nifty_last=(
+            live_quotes.get("Nifty 50")
+            or (nifty_snapshot or {}).get("last")
+        ),
+        gift=fetch_gift_nifty(),
+        us_futures=futures_moves,
+        global_records=global_records,
+        fii_dii=fetch_fii_dii(),
+        news=news_digest,
+        snapshot=nifty_snapshot,
+    )
 
     options = (
         fetch_fyers_options(spot_hint)
         or fetch_nse_fallback()
     )
+
+    option_history = None
+    if options and options.get("ladder"):
+        try:
+            options["ladder_momentum"] = ladder_momentum(
+                prior_strategy_state.get("option_history"),
+                options["ladder"],
+                options["captured_at"],
+                options["expiry"],
+            )
+            option_history = record_option_history(
+                prior_strategy_state.get("option_history"),
+                options["captured_at"],
+                options["expiry"],
+                options["atm"],
+                options.get("strike_step"),
+                options["chain"],
+            )
+        except Exception as exc:
+            print("Option ladder momentum error:", exc)
+            option_history = prior_strategy_state.get("option_history")
 
     def score_of(item):
         return item["score"] if item else None
@@ -2189,7 +2232,14 @@ def main():
         ),
         ("Global markets", 10, global_score),
         ("News sentiment", 10, news_score),
+        (
+            "Gap outlook",
+            overall_weight(gap_outlook["alert_level"]),
+            gap_outlook["score"],
+        ),
     ]
+
+    total_weight = sum(weight for _, weight, _ in components)
 
     available = [
         (name, weight, score)
@@ -2201,6 +2251,8 @@ def main():
         weight
         for _, weight, _ in available
     )
+
+    coverage_pct = weight_sum / total_weight * 100 if total_weight else 0.0
 
     total = (
         sum(weight * score for _, weight, score in available)
@@ -2234,6 +2286,8 @@ def main():
             "expiry": options.get("expiry"),
             "chain": options["chain"],
         }
+        if option_history is not None:
+            next_strategy_state["option_history"] = option_history
     persist_strategy_state(next_strategy_state, strategy)
 
     # --------------------------------------------------------
@@ -2259,8 +2313,10 @@ def main():
 
     lines.append(
         "_Signal coverage: %.0f%% of weight available_"
-        % weight_sum
+        % coverage_pct
     )
+
+    lines.extend(render_gap_outlook_lines(gap_outlook))
 
     if _fyers_error:
         lines.append(
@@ -2400,12 +2456,14 @@ def main():
         global_score=global_score,
         components=components,
         total=total,
-        weight_sum=weight_sum,
+        weight_sum=coverage_pct,
         status=status,
         strategy=strategy,
         live_quotes=live_quotes,
         ltp_captured_at=ltp_captured_at,
         index_levels=index_levels,
+        gap_outlook=gap_outlook,
+        news_stats=news_digest["stats"],
     )
 
     save_dashboard_snapshot(payload)
